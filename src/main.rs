@@ -1089,9 +1089,9 @@ impl Handler {
         let cmd = args.first().unwrap_or(&"").to_lowercase();
         let rest = &args[1..];
         let gid = match msg.guild_id { Some(g) => g, None => return };
-        let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => return };
         let author = &msg.author;
         let channel = msg.channel_id;
+        let member = match gid.member(&self.http, author.id).await { Ok(m) => m, Err(_) => return };
 
         let is_owner = || { gid.to_guild_cached(&ctx.cache).map(|g| author.id == g.owner_id).unwrap_or(false) };
         let has_perms = |perms: Permissions| member.permissions(&ctx.cache).unwrap_or(Permissions::empty()).contains(perms);
