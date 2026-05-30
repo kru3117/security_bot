@@ -704,7 +704,7 @@ impl EventHandler for Handler {
 
     async fn guild_update(&self, ctx: Context, old: Option<Guild>, new: serenity::model::guild::PartialGuild) {
         let old = match old { Some(g) => g, None => { self.state.guild_snapshots.insert(new.id, snap_partial_guild(&new)); return; } };
-        let gid = new.id;
+        let mut gid = new.id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) { self.state.guild_snapshots.insert(gid, snap_partial_guild(&new)); return; }
         let now = now_pht().timestamp_millis() as f64 / 1000.0;
         if let Some(exp) = self.state.handled_guild_updates.get(&gid) { if now < *exp { return; } } self.state.handled_guild_updates.insert(gid, now + GUILD_UPDATE_DEDUP_TTL_SECS);
@@ -1400,7 +1400,7 @@ impl Handler {
                 let target = match msg.mentions.iter().next() { Some(u) => u, None => { let _ = send_embed(&self.http, channel, "❌ Missing User", "Please mention a user.", 0xFF0000).await; return; } };
                 let role_id = match msg.mention_roles.iter().next() { Some(r) => *r, None => { let _ = send_embed(&self.http, channel, "❌ Missing Role", "Please mention a role.", 0xFF0000).await; return; } };
                 let role = match gid.to_guild_cached(&ctx.cache).and_then(|g| g.roles.get(&role_id).cloned()) { Some(r) => r, None => { let _ = send_embed(&self.http, channel, "❌ Role Not Found", "Could not find that role.", 0xFF0000).await; return; } };
-                if let Ok(member) = gid.member(&self.http, target.id).await {
+                if let Ok(mut member) = gid.member(&self.http, target.id).await {
                     if member.roles.contains(&role.id) { let _ = send_embed(&self.http, channel, "Role Already Assigned", &format!("{} already has {}", target.mention(), role.mention()), 0xFFA500).await; return; }
                     if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
                         let bot_id = ctx.cache.current_user().id;
