@@ -914,9 +914,15 @@ impl EventHandler for Handler {
         let gid = match msg.guild_id { Some(g) => g, None => return };
         let now = now_pht();
 
-        // Rate limiting for commands
+        // Muted check — applies to everyone
+        if let Some(until) = self.state.muted_users.get(&msg.author.id) { if now < *until { let _ = msg.delete(&self.http).await; return; } else { self.state.muted_users.remove(&msg.author.id); } }
+
+        // Commands are dispatched FIRST, before any security filtering.
+        // This prevents filters (banned words, link checker, etc.) from blocking
+        // legitimate commands like `xban @user spamming` or `xkick @user hacking`.
         let is_cmd = msg.content.starts_with('x') || msg.content.starts_with("null");
         if is_cmd {
+            // Rate limiting
             if let Some(until) = self.state.rate_limited_until.get(&msg.author.id) { if now < *until { let _ = msg.delete(&self.http).await; return; } else { self.state.rate_limited_until.remove(&msg.author.id); } }
             let now_ts = now.timestamp_millis() as f64 / 1000.0;
             let mut timestamps = self.state.command_timestamps.entry(msg.author.id).or_insert_with(|| VecDeque::with_capacity(10));
@@ -931,14 +937,12 @@ impl EventHandler for Handler {
                 if let Ok(sent) = msg.channel_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await { tokio::time::sleep(Duration::from_secs(5)).await; let _ = sent.delete(&self.http).await; }
                 return;
             }
+            self.process_commands(ctx, &msg).await;
+            return;
         }
 
-        // Muted check
-        if let Some(until) = self.state.muted_users.get(&msg.author.id) { if now < *until { let _ = msg.delete(&self.http).await; return; } else { self.state.muted_users.remove(&msg.author.id); } }
-
-        // Whitelisted bypass
+        // Whitelisted users skip all security checks for normal messages
         if is_whitelisted(&self.state, &self.http, &ctx.cache, gid, msg.author.id).await {
-            self.process_commands(ctx, &msg).await;
             return;
         }
 
@@ -953,7 +957,7 @@ impl EventHandler for Handler {
         }
 
         if self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
-            let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => { self.process_commands(ctx, &msg).await; return; } };
+            let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => return };
             let link_bypassed = is_link_bypassed(&self.state, &self.http, &ctx.cache, gid, &member).await;
 
             // Invite detection & server ad enforcement
@@ -963,7 +967,6 @@ impl EventHandler for Handler {
                 if let Ok(invite) = self.http.get_invite(code, false, false, None).await {
                     if let Some(inv_guild) = invite.guild {
                         if inv_guild.id != gid.0 {
-                            // server ad
                             let now_ts = now.timestamp_millis() as f64 / 1000.0;
                             let ad_reg = self.state.server_ad_registry.entry(gid).or_insert_with(DashMap::new);
                             let existing = ad_reg.get(&msg.author.id).map(|e| e.clone());
@@ -1072,28 +1075,11 @@ impl EventHandler for Handler {
                 }
             }
         }
-
-        // "null av" natural language
-        let null_av_re = Regex::new(r"(?i)^null\s+av(?:\s+(.+))?$").unwrap();
-        if let Some(caps) = null_av_re.captures(&msg.content) {
-            let query = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let target = if let Some(mention) = msg.mentions.first() {
-                Some(mention.clone())
-            } else if !query.is_empty() {
-                let lower = query.to_lowercase();
-                ctx.cache.guild(gid).and_then(|g| g.members.values().find(|m| m.display_name().to_lowercase().contains(&lower) || m.user.name.to_lowercase().contains(&lower)).map(|m| m.user.clone()))
-            } else {
-                None
-            };
-            if let Some(user) = target {
-                let mut embed = CreateEmbed::default();
-                embed.color(EMBED_COLOR).image(user.avatar_url().unwrap_or_else(|| user.default_avatar_url()));
-                let _ = msg.channel_id.send_message(&self.http, |m| m.content(format!("Here is {}'s avatar.", user.mention())).embed(|e| { *e = embed.clone(); e })).await;
+    }
+}
             }
-            return;
         }
 
-        self.process_commands(ctx, &msg).await;
     }
 }
 
