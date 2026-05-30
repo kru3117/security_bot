@@ -30,5 +30,9 @@ jobs:
 
       - name: Build release
         run: cargo build --release
-        env:
-          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: security_bot
+          path: target/release/security_bot
