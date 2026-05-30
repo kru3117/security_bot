@@ -1077,12 +1077,6 @@ impl EventHandler for Handler {
         }
     }
 }
-            }
-        }
-
-    }
-}
-
 // ------------------------------------------------------------
 //  COMMAND PROCESSING (All commands fully implemented)
 // ------------------------------------------------------------
