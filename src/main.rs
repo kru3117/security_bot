@@ -953,7 +953,7 @@ impl EventHandler for Handler {
         }
 
         if self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
-            let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => return };
+            let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => { self.process_commands(ctx, &msg).await; return; } };
             let link_bypassed = is_link_bypassed(&self.state, &self.http, &ctx.cache, gid, &member).await;
 
             // Invite detection & server ad enforcement
