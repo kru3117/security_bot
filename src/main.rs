@@ -24,7 +24,7 @@ use tokio::sync::Semaphore;
 use dashmap::{DashMap, DashSet};
 use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use regex::Regex;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions, Row};
+use sqlx::{PgPool, postgres::PgPoolOptions, Row};
 use reqwest;
 use std::{
     collections::{HashSet, VecDeque},
@@ -206,26 +206,30 @@ impl BotState {
 //  DATABASE
 // ------------------------------------------------------------
 #[derive(Clone)]
-struct Database { pool: SqlitePool }
+struct Database { pool: PgPool }
 impl Database {
-    async fn new(path: &str) -> Self {
-        let pool = SqlitePoolOptions::new().max_connections(5).connect(path).await.unwrap();
+    async fn new(url: &str) -> Self {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(url)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to connect to Postgres: {}", e));
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS protection ( guild_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0 );
-            CREATE TABLE IF NOT EXISTS whitelist_users ( guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id) );
-            CREATE TABLE IF NOT EXISTS whitelist_roles ( guild_id INTEGER NOT NULL, role_id INTEGER NOT NULL, PRIMARY KEY (guild_id, role_id) );
-            CREATE TABLE IF NOT EXISTS muted_users ( guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, until_ts TEXT NOT NULL, PRIMARY KEY (guild_id, user_id) );
+            CREATE TABLE IF NOT EXISTS protection ( guild_id BIGINT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0 );
+            CREATE TABLE IF NOT EXISTS whitelist_users ( guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, PRIMARY KEY (guild_id, user_id) );
+            CREATE TABLE IF NOT EXISTS whitelist_roles ( guild_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMARY KEY (guild_id, role_id) );
+            CREATE TABLE IF NOT EXISTS muted_users ( guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, until_ts TEXT NOT NULL, PRIMARY KEY (guild_id, user_id) );
             CREATE TABLE IF NOT EXISTS guild_config (
-                guild_id INTEGER PRIMARY KEY, threshold_count INTEGER NOT NULL DEFAULT 1, threshold_window INTEGER NOT NULL DEFAULT 10,
-                punishment TEXT NOT NULL DEFAULT 'ban', max_messages_per_minute INTEGER NOT NULL DEFAULT 10,
-                max_duplicate_messages INTEGER NOT NULL DEFAULT 3, max_emojis INTEGER NOT NULL DEFAULT 5,
-                auto_ban_threshold INTEGER NOT NULL DEFAULT 5, link_whitelist TEXT NOT NULL DEFAULT '["youtube.com","github.com"]',
+                guild_id BIGINT PRIMARY KEY, threshold_count BIGINT NOT NULL DEFAULT 1, threshold_window BIGINT NOT NULL DEFAULT 10,
+                punishment TEXT NOT NULL DEFAULT 'ban', max_messages_per_minute BIGINT NOT NULL DEFAULT 10,
+                max_duplicate_messages BIGINT NOT NULL DEFAULT 3, max_emojis BIGINT NOT NULL DEFAULT 5,
+                auto_ban_threshold BIGINT NOT NULL DEFAULT 5, link_whitelist TEXT NOT NULL DEFAULT '["youtube.com","github.com"]',
                 banned_words TEXT NOT NULL DEFAULT '["spam","hack","cheat","discord.gg"]'
             );
-            CREATE TABLE IF NOT EXISTS link_bypass_users ( guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id) );
-            CREATE TABLE IF NOT EXISTS link_bypass_roles ( guild_id INTEGER NOT NULL, role_id INTEGER NOT NULL, PRIMARY KEY (guild_id, role_id) );
-            CREATE TABLE IF NOT EXISTS action_history ( id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL );
+            CREATE TABLE IF NOT EXISTS link_bypass_users ( guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, PRIMARY KEY (guild_id, user_id) );
+            CREATE TABLE IF NOT EXISTS link_bypass_roles ( guild_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMARY KEY (guild_id, role_id) );
+            CREATE TABLE IF NOT EXISTS action_history ( id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL );
             "#,
         ).execute(&pool).await.unwrap();
         Self { pool }
@@ -247,23 +251,23 @@ impl Database {
             let uid = UserId(row.get::<i64,_>(1) as u64);
             if let Ok(until) = DateTime::parse_from_rfc3339(row.get::<&str, _>(2)) {
                 if until > now { state.muted_users.insert(uid, until); }
-                else { let _ = sqlx::query("DELETE FROM muted_users WHERE user_id = ? AND guild_id = ?").bind(uid.0 as i64).bind(row.get::<i64, _>(0)).execute(&self.pool).await; }
+                else { let _ = sqlx::query("DELETE FROM muted_users WHERE user_id = $1 AND guild_id = $2").bind(uid.0 as i64).bind(row.get::<i64, _>(0)).execute(&self.pool).await; }
             }
         }
         println!("[DB] All data loaded.");
     }
-    async fn set_protection(&self, gid: GuildId, en: bool) { sqlx::query("INSERT OR REPLACE INTO protection(guild_id, enabled) VALUES (?, ?)").bind(gid.0 as i64).bind(en as i32).execute(&self.pool).await.unwrap(); }
-    async fn add_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT OR IGNORE INTO whitelist_users(guild_id, user_id) VALUES (?, ?)").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM whitelist_users WHERE guild_id = ? AND user_id = ?").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT OR IGNORE INTO whitelist_roles(guild_id, role_id) VALUES (?, ?)").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM whitelist_roles WHERE guild_id = ? AND role_id = ?").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT OR IGNORE INTO link_bypass_users(guild_id, user_id) VALUES (?, ?)").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM link_bypass_users WHERE guild_id = ? AND user_id = ?").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT OR IGNORE INTO link_bypass_roles(guild_id, role_id) VALUES (?, ?)").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM link_bypass_roles WHERE guild_id = ? AND role_id = ?").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_mute(&self, gid: GuildId, uid: UserId, until: DateTime<chrono::FixedOffset>) { sqlx::query("INSERT OR REPLACE INTO muted_users(guild_id, user_id, until_ts) VALUES (?, ?, ?)").bind(gid.0 as i64).bind(uid.0 as i64).bind(until.to_rfc3339()).execute(&self.pool).await.unwrap(); }
-    async fn remove_mute(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM muted_users WHERE guild_id = ? AND user_id = ?").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn log_action(&self, gid: GuildId, uid: UserId, action: &str, reason: &str) { let ts = now_pht().to_rfc3339(); sqlx::query("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES (?, ?, ?, ?, ?)").bind(gid.0 as i64).bind(uid.0 as i64).bind(action).bind(reason).bind(ts).execute(&self.pool).await.unwrap(); }
+    async fn set_protection(&self, gid: GuildId, en: bool) { sqlx::query("INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled").bind(gid.0 as i64).bind(en as i32).execute(&self.pool).await.unwrap(); }
+    async fn add_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn remove_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn add_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn remove_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn add_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn remove_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn add_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn remove_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn add_mute(&self, gid: GuildId, uid: UserId, until: DateTime<chrono::FixedOffset>) { sqlx::query("INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts").bind(gid.0 as i64).bind(uid.0 as i64).bind(until.to_rfc3339()).execute(&self.pool).await.unwrap(); }
+    async fn remove_mute(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
+    async fn log_action(&self, gid: GuildId, uid: UserId, action: &str, reason: &str) { let ts = now_pht().to_rfc3339(); sqlx::query("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1, $2, $3, $4, $5)").bind(gid.0 as i64).bind(uid.0 as i64).bind(action).bind(reason).bind(ts).execute(&self.pool).await.unwrap(); }
     async fn save_guild_config(&self, gid: GuildId) {
         // Extract all values before any await point so MutexGuards are dropped first
         let (threshold_count, threshold_window_ms, punishment_str,
@@ -283,7 +287,7 @@ impl Database {
                 serde_json::to_string(&sec_guard.banned_words).unwrap(),
             )
         }; // guards dropped here, before the await below
-        sqlx::query("INSERT OR REPLACE INTO guild_config(guild_id, threshold_count, threshold_window, punishment, max_messages_per_minute, max_duplicate_messages, max_emojis, auto_ban_threshold, link_whitelist, banned_words) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO guild_config(guild_id, threshold_count, threshold_window, punishment, max_messages_per_minute, max_duplicate_messages, max_emojis, auto_ban_threshold, link_whitelist, banned_words) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (guild_id) DO UPDATE SET threshold_count=EXCLUDED.threshold_count, threshold_window=EXCLUDED.threshold_window, punishment=EXCLUDED.punishment, max_messages_per_minute=EXCLUDED.max_messages_per_minute, max_duplicate_messages=EXCLUDED.max_duplicate_messages, max_emojis=EXCLUDED.max_emojis, auto_ban_threshold=EXCLUDED.auto_ban_threshold, link_whitelist=EXCLUDED.link_whitelist, banned_words=EXCLUDED.banned_words")
             .bind(gid.0 as i64).bind(threshold_count).bind(threshold_window_ms)
             .bind(punishment_str).bind(max_messages_per_minute).bind(max_duplicate_messages)
             .bind(max_emojis).bind(auto_ban_threshold)
@@ -291,7 +295,7 @@ impl Database {
             .execute(&self.pool).await.unwrap();
     }
     async fn load_guild_config(&self, gid: GuildId) {
-        if let Some(row) = sqlx::query("SELECT * FROM guild_config WHERE guild_id = ?").bind(gid.0 as i64).fetch_optional(&self.pool).await.unwrap() {
+        if let Some(row) = sqlx::query("SELECT * FROM guild_config WHERE guild_id = $1").bind(gid.0 as i64).fetch_optional(&self.pool).await.unwrap() {
             let mut sec_guard = security_config().lock().unwrap();
             let mut anti_guard = antinuke_config().lock().unwrap();
             let cfg = &mut *sec_guard; let antinuke = &mut *anti_guard;
@@ -559,7 +563,7 @@ async fn poll_audit_logs(state: Arc<BotState>, http: Arc<Http>, cache: Arc<Cache
 }
 
 async fn cleanup_mutes(state: Arc<BotState>, db: Arc<Database>) {
-    loop { tokio::time::sleep(Duration::from_secs(60)).await; let now = now_pht(); let to_remove: Vec<UserId> = state.muted_users.iter().filter_map(|e| if now >= *e.value() { Some(*e.key()) } else { None }).collect(); let had_removes = !to_remove.is_empty(); for uid in &to_remove { state.muted_users.remove(uid); } if had_removes { let _ = sqlx::query("DELETE FROM muted_users WHERE until_ts <= ?").bind(now.to_rfc3339()).execute(&db.pool).await; } }
+    loop { tokio::time::sleep(Duration::from_secs(60)).await; let now = now_pht(); let to_remove: Vec<UserId> = state.muted_users.iter().filter_map(|e| if now >= *e.value() { Some(*e.key()) } else { None }).collect(); let had_removes = !to_remove.is_empty(); for uid in &to_remove { state.muted_users.remove(uid); } if had_removes { let _ = sqlx::query("DELETE FROM muted_users WHERE until_ts <= $1").bind(now.to_rfc3339()).execute(&db.pool).await; } }
 }
 
 // ------------------------------------------------------------
@@ -1692,7 +1696,7 @@ impl Handler {
                 if !manage_msgs { let _ = send_embed(&self.http, channel, "❌ Missing Permissions", "You need Manage Messages permission.", 0xFF0000).await; return; }
                 if rest.is_empty() { let _ = send_embed(&self.http, channel, "❌ Missing User", "Usage: `xhistory @user`", 0xFF0000).await; return; }
                 let target = match msg.mentions.iter().next() { Some(u) => u, None => { let _ = send_embed(&self.http, channel, "❌ Missing User", "Please mention a user.", 0xFF0000).await; return; } };
-                let rows = sqlx::query("SELECT action, reason, timestamp FROM action_history WHERE guild_id = ? AND user_id = ? ORDER BY id DESC LIMIT 15")
+                let rows = sqlx::query("SELECT action, reason, timestamp FROM action_history WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 15")
                     .bind(gid.0 as i64).bind(target.id.0 as i64).fetch_all(&self.db.pool).await.unwrap_or_default();
                 let mut embed = CreateEmbed::default();
                 embed.title(format!("Action History — {}", target.name)).description(format!("Last {} recorded actions for {}", rows.len(), target.mention())).color(EMBED_COLOR).timestamp(now_pht()) .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()));
@@ -1770,7 +1774,8 @@ impl Handler {
 async fn main() {
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN environment variable not set");
     let state = Arc::new(BotState::new());
-    let db = Arc::new(Database::new("security.db").await);
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let db = Arc::new(Database::new(&db_url).await);
     db.load_all(&state).await;
     let http = Arc::new(Http::new(&token));
     let handler = Handler { state, db, http };
