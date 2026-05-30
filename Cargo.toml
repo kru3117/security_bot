@@ -2,11 +2,9 @@
 name = "security_bot"
 version = "0.1.0"
 edition = "2021"
-
 [[bin]]
 name = "security_bot"
 path = "src/main.rs"
-
 [dependencies]
 serenity = { version = "0.11.7", default-features = false, features = [
     "client",
@@ -28,7 +26,6 @@ serde_json = "1.0"
 futures = "0.3.32"
 tracing = "0.1.44"
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-
 [profile.release]
 opt-level = 3
 lto = true
