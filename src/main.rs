@@ -1137,15 +1137,70 @@ impl Handler {
         let gid = match msg.guild_id { Some(g) => g, None => return };
         let author = &msg.author;
         let channel = msg.channel_id;
-        let member = match gid.member(&self.http, author.id).await { Ok(m) => m, Err(_) => return };
+        // Fetch member for role/permission checks. If this fails we still continue —
+        // is_owner() will work via HTTP guild fetch, and we fail-safe on perms.
+        let member_opt = gid.member(&self.http, author.id).await.ok();
+        // Create a dummy member if fetch failed so we can still process owner commands
+        let member = match member_opt {
+            Some(m) => m,
+            None => {
+                // Can't get member — only allow if they're the server owner (checked via HTTP)
+                let owner_id_check = match self.http.get_guild(gid.0).await {
+                    Ok(g) => g.owner_id,
+                    Err(_) => UserId(0),
+                };
+                if author.id != owner_id_check {
+                    return; // non-owner, can't verify perms, drop safely
+                }
+                // Owner — try one more time
+                match gid.member(&self.http, author.id).await {
+                    Ok(m) => m,
+                    Err(_) => return,
+                }
+            }
+        };
 
-        let is_owner = || { gid.to_guild_cached(&ctx.cache).map(|g| author.id == g.owner_id).unwrap_or(false) };
-        let has_perms = |perms: Permissions| member.permissions(&ctx.cache).unwrap_or(Permissions::empty()).contains(perms);
-        let is_admin = has_perms(Permissions::ADMINISTRATOR);
-        let manage_msgs = has_perms(Permissions::MANAGE_MESSAGES);
-        let ban_members = has_perms(Permissions::BAN_MEMBERS);
-        let kick_members = has_perms(Permissions::KICK_MEMBERS);
-        let manage_roles = has_perms(Permissions::MANAGE_ROLES);
+        // Resolve owner_id: try cache first, fall back to HTTP fetch
+        let owner_id = if let Some(g) = gid.to_guild_cached(&ctx.cache) {
+            g.owner_id
+        } else {
+            match self.http.get_guild(gid.0).await {
+                Ok(g) => g.owner_id,
+                Err(_) => UserId(0),
+            }
+        };
+        let is_owner = || { author.id == owner_id };
+
+        // Permissions: use member roles against cache; fall back to checking HTTP-fetched member
+        // If cache has the guild roles, use them. Otherwise treat admins as having all perms
+        // by checking if they are the owner (safest fallback).
+        let cached_perms = member.permissions(&ctx.cache).unwrap_or(Permissions::empty());
+        // If cache returned empty and member is not guild owner, try to get permissions from roles directly
+        let effective_perms = if cached_perms.is_empty() {
+            // Build permissions manually from member roles using cache
+            if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
+                let mut perms = Permissions::empty();
+                for role_id in &member.roles {
+                    if let Some(role) = guild.roles.get(role_id) {
+                        perms |= role.permissions;
+                    }
+                }
+                // @everyone role
+                if let Some(everyone) = guild.roles.get(&RoleId(gid.0)) {
+                    perms |= everyone.permissions;
+                }
+                perms
+            } else {
+                cached_perms
+            }
+        } else {
+            cached_perms
+        };
+        let is_admin = effective_perms.contains(Permissions::ADMINISTRATOR) || is_owner();
+        let manage_msgs = effective_perms.contains(Permissions::MANAGE_MESSAGES) || is_owner();
+        let ban_members = effective_perms.contains(Permissions::BAN_MEMBERS) || is_owner();
+        let kick_members = effective_perms.contains(Permissions::KICK_MEMBERS) || is_owner();
+        let manage_roles = effective_perms.contains(Permissions::MANAGE_ROLES) || is_owner();
 
         async fn send_embed(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
             let mut embed = CreateEmbed::default();
