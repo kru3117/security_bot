@@ -1127,80 +1127,94 @@ impl Handler {
     async fn process_commands(&self, ctx: Context, msg: &Message) {
         let content = &msg.content;
         let cl2 = content.to_lowercase();
-        // Determine prefix — check "null" before "x" since "null" doesn't start with "x"
+
+        // ── Prefix stripping ──────────────────────────────────────────────────
+        // Prefixes: "null" (4 chars) or "x" (1 char). Check "null" first.
         let prefix_len = if cl2.starts_with("null") { 4 } else if cl2.starts_with('x') { 1 } else { return; };
-        // Split remaining text into args: first token is the command name, rest are arguments
         let after_prefix = content[prefix_len..].trim();
         let args: Vec<&str> = after_prefix.split_whitespace().collect();
         let cmd = args.first().unwrap_or(&"").to_lowercase();
         let rest = &args[1..];
-        let gid = match msg.guild_id { Some(g) => g, None => return };
+
+        println!("[CMD] user={} cmd={:?} rest={:?}", msg.author.name, cmd, rest);
+
+        let gid = match msg.guild_id { Some(g) => g, None => { println!("[CMD] no guild"); return; } };
         let author = &msg.author;
         let channel = msg.channel_id;
-        // Fetch member for role/permission checks. If this fails we still continue —
-        // is_owner() will work via HTTP guild fetch, and we fail-safe on perms.
-        let member_opt = gid.member(&self.http, author.id).await.ok();
-        // Create a dummy member if fetch failed so we can still process owner commands
-        let member = match member_opt {
+
+        // ── Guild + owner resolution — CACHE ONLY, no extra HTTP calls ────────
+        // The cache is populated by GatewayIntents::all() on guild_create.
+        // If the guild isn't cached yet we send a generic error rather than silently dropping.
+        let guild = match gid.to_guild_cached(&ctx.cache) {
+            Some(g) => g,
+            None => {
+                println!("[CMD] guild not in cache yet for {}", gid.0);
+                // Fallback: try HTTP
+                match self.http.get_guild(gid.0).await {
+                    Ok(_) => {},
+                    Err(e) => { println!("[CMD] guild HTTP fetch failed: {}", e); }
+                }
+                // Still no guild in cache — send a user-visible error so they know
+                let _ = channel.send_message(&self.http, |m| m.content("⚠️ Guild not cached yet — please wait a moment and try again.")).await;
+                return;
+            }
+        };
+
+        let owner_id = guild.owner_id;
+        let is_owner = || author.id == owner_id;
+
+        // Build member permissions from guild role cache
+        // member() from cache is instant; from HTTP is slow and can fail
+        let member = match guild.members.get(&author.id).cloned() {
             Some(m) => m,
             None => {
-                // Can't get member — only allow if they're the server owner (checked via HTTP)
-                let owner_id_check = match self.http.get_guild(gid.0).await {
-                    Ok(g) => g.owner_id,
-                    Err(_) => UserId(0),
-                };
-                if author.id != owner_id_check {
-                    return; // non-owner, can't verify perms, drop safely
-                }
-                // Owner — try one more time
+                // Not in cache — fetch via HTTP once
+                println!("[CMD] member not in cache, fetching via HTTP");
                 match gid.member(&self.http, author.id).await {
                     Ok(m) => m,
-                    Err(_) => return,
-                }
-            }
-        };
-
-        // Resolve owner_id: try cache first, fall back to HTTP fetch
-        let owner_id = if let Some(g) = gid.to_guild_cached(&ctx.cache) {
-            g.owner_id
-        } else {
-            match self.http.get_guild(gid.0).await {
-                Ok(g) => g.owner_id,
-                Err(_) => UserId(0),
-            }
-        };
-        let is_owner = || { author.id == owner_id };
-
-        // Permissions: use member roles against cache; fall back to checking HTTP-fetched member
-        // If cache has the guild roles, use them. Otherwise treat admins as having all perms
-        // by checking if they are the owner (safest fallback).
-        let cached_perms = member.permissions(&ctx.cache).unwrap_or(Permissions::empty());
-        // If cache returned empty and member is not guild owner, try to get permissions from roles directly
-        let effective_perms = if cached_perms.is_empty() {
-            // Build permissions manually from member roles using cache
-            if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
-                let mut perms = Permissions::empty();
-                for role_id in &member.roles {
-                    if let Some(role) = guild.roles.get(role_id) {
-                        perms |= role.permissions;
+                    Err(e) => {
+                        println!("[CMD] member fetch failed: {}", e);
+                        if !is_owner() {
+                            let _ = channel.send_message(&self.http, |m| m.content("⚠️ Could not fetch your member data — please try again.")).await;
+                            return;
+                        }
+                        // For owner: proceed with empty perms, is_owner covers everything
+                        // We need a Member — can't proceed without one for some ops.
+                        // Re-drop: if this fails even the owner can't use the bot, which is wrong.
+                        // Instead signal the issue clearly.
+                        let _ = channel.send_message(&self.http, |m| m.content("⚠️ Could not fetch member data. Please check bot permissions (View Members).")).await;
+                        return;
                     }
                 }
-                // @everyone role
-                if let Some(everyone) = guild.roles.get(&RoleId(gid.0)) {
-                    perms |= everyone.permissions;
-                }
-                perms
-            } else {
-                cached_perms
             }
-        } else {
-            cached_perms
         };
-        let is_admin = effective_perms.contains(Permissions::ADMINISTRATOR) || is_owner();
-        let manage_msgs = effective_perms.contains(Permissions::MANAGE_MESSAGES) || is_owner();
-        let ban_members = effective_perms.contains(Permissions::BAN_MEMBERS) || is_owner();
-        let kick_members = effective_perms.contains(Permissions::KICK_MEMBERS) || is_owner();
-        let manage_roles = effective_perms.contains(Permissions::MANAGE_ROLES) || is_owner();
+        // Drop the guild cache lock before any awaits
+        drop(guild);
+
+        // Re-acquire guild for permission calculation (short-lived borrow)
+        let effective_perms = if let Some(g) = gid.to_guild_cached(&ctx.cache) {
+            let mut perms = Permissions::empty();
+            // @everyone role always applies
+            if let Some(everyone) = g.roles.get(&RoleId(gid.0)) {
+                perms |= everyone.permissions;
+            }
+            for role_id in &member.roles {
+                if let Some(role) = g.roles.get(role_id) {
+                    perms |= role.permissions;
+                }
+            }
+            perms
+        } else {
+            Permissions::empty()
+        };
+
+        let is_admin    = is_owner() || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let manage_msgs = is_owner() || effective_perms.contains(Permissions::MANAGE_MESSAGES) || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let ban_members = is_owner() || effective_perms.contains(Permissions::BAN_MEMBERS) || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let kick_members= is_owner() || effective_perms.contains(Permissions::KICK_MEMBERS) || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let manage_roles= is_owner() || effective_perms.contains(Permissions::MANAGE_ROLES) || effective_perms.contains(Permissions::ADMINISTRATOR);
+
+        println!("[CMD] owner={} admin={} perms={:?}", is_owner(), is_admin, effective_perms.bits());
 
         async fn send_embed(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
             let mut embed = CreateEmbed::default();
@@ -1209,6 +1223,32 @@ impl Handler {
         }
 
         match cmd.as_str() {
+            // ── Hidden debug command — type xdebug to see your permission state ──
+            "debug" => {
+                let msg_text = format!(
+                    "```
+[DEBUG]
+User: {} ({})
+Guild: {}
+Owner ID: {}
+Is Owner: {}
+Is Admin: {}
+Manage Messages: {}
+Ban Members: {}
+Kick Members: {}
+Manage Roles: {}
+Raw Perms bits: {}
+Roles: {}
+```",
+                    author.name, author.id.0,
+                    gid.0,
+                    owner_id.0,
+                    is_owner(), is_admin, manage_msgs, ban_members, kick_members, manage_roles,
+                    effective_perms.bits(),
+                    member.roles.iter().map(|r| r.0.to_string()).collect::<Vec<_>>().join(", ")
+                );
+                let _ = channel.send_message(&self.http, |m| m.content(msg_text)).await;
+            }
             "antinuke" => {
                 if !is_owner() { send_embed(&self.http, channel, "🔒 Owner Only", "This command can only be used by the **server owner**.", 0xFF0000u32).await; return; }
                 if rest.is_empty() {
