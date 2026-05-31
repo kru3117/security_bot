@@ -1075,8 +1075,8 @@ impl EventHandler for Handler {
     }
 
     // FIX: channel_update signature uses Option<GuildChannel> and GuildChannel directly
-    async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
-        let old = match old { Some(o) => o, None => return };
+    async fn channel_update(&self, ctx: Context, old: Option<Channel>, new: GuildChannel) {
+        let old = match old.and_then(|c| c.guild()) { Some(o) => o, None => return };
         let gid = new.guild_id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.channel_snapshots.insert(new.id, snap_channel(&new));
@@ -1141,7 +1141,7 @@ impl EventHandler for Handler {
             Some(g) => g,
             None => { self.state.guild_snapshots.insert(new.id, snap_partial_guild(&new)); return; }
         };
-        let gid = new.id;
+        let mut gid = new.id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.guild_snapshots.insert(gid, snap_partial_guild(&new));
             return;
@@ -2650,31 +2650,36 @@ impl Handler {
                     return;
                 }
                 let target = if let Some(u) = msg.mentions.iter().next() { u } else { author };
-                use rand::Rng;
-                let mut rng = rand::thread_rng();
-                let ph_ranges = ["202.90","203.177","210.213","218.108","124.105",
-                                 "112.198","180.190","49.144","103.10","27.109"];
-                let fake_ip = format!("{}.{}.{}", ph_ranges[rng.gen::<usize>() % ph_ranges.len()],
-                    rng.gen::<u8>() % 255 + 1, rng.gen::<u8>() % 255 + 1);
-                let cities = ["Manila","Quezon City","Makati","Cebu City","Davao City","Taguig",
-                              "Pasig","Antipolo","Caloocan","Zamboanga City","Las Piñas","Bacoor",
-                              "Muntinlupa","Parañaque","Valenzuela","Iloilo City","Bacolod",
-                              "Cagayan de Oro","General Santos","Baguio"];
-                let provinces = ["Metro Manila","Cebu","Davao del Sur","Cavite","Rizal","Laguna",
-                                 "Bulacan","Pampanga","Batangas","Zambales","Iloilo",
-                                 "Negros Occidental","Misamis Oriental","South Cotabato","Benguet"];
-                let regions = ["National Capital Region (NCR)","Central Luzon","CALABARZON",
-                               "Central Visayas","Davao Region","Western Visayas",
-                               "Northern Mindanao","SOCCSKSARGEN","Cordillera Administrative Region"];
-                let isps = ["PLDT Inc.","Globe Telecom","Smart Communications","Sky Broadband",
-                            "Converge ICT","DITO Telecommunity","Eastern Communications",
-                            "Philippine Long Distance Telephone Company","Bayantel","Sun Cellular"];
-                let city     = cities[rng.gen::<usize>() % cities.len()];
-                let province = provinces[rng.gen::<usize>() % provinces.len()];
-                let region   = regions[rng.gen::<usize>() % regions.len()];
-                let isp      = isps[rng.gen::<usize>() % isps.len()];
-                let lat: f64 = rng.gen::<f64>() * (21.0 - 4.5) + 4.5;
-                let lon: f64 = rng.gen::<f64>() * (127.0 - 116.0) + 116.0;
+                let (fake_ip, city, province, region, isp, lat, lon) = {
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    let ph_ranges = ["202.90","203.177","210.213","218.108","124.105",
+                                     "112.198","180.190","49.144","103.10","27.109"];
+                    let fake_ip = format!("{}.{}.{}", ph_ranges[rng.gen::<usize>() % ph_ranges.len()],
+                        rng.gen::<u8>() % 255 + 1, rng.gen::<u8>() % 255 + 1);
+                    let cities = ["Manila","Quezon City","Makati","Cebu City","Davao City","Taguig",
+                                  "Pasig","Antipolo","Caloocan","Zamboanga City","Las Piñas","Bacoor",
+                                  "Muntinlupa","Parañaque","Valenzuela","Iloilo City","Bacolod",
+                                  "Cagayan de Oro","General Santos","Baguio"];
+                    let provinces = ["Metro Manila","Cebu","Davao del Sur","Cavite","Rizal","Laguna",
+                                     "Bulacan","Pampanga","Batangas","Zambales","Iloilo",
+                                     "Negros Occidental","Misamis Oriental","South Cotabato","Benguet"];
+                    let regions = ["National Capital Region (NCR)","Central Luzon","CALABARZON",
+                                   "Central Visayas","Davao Region","Western Visayas",
+                                   "Northern Mindanao","SOCCSKSARGEN","Cordillera Administrative Region"];
+                    let isps = ["PLDT Inc.","Globe Telecom","Smart Communications","Sky Broadband",
+                                "Converge ICT","DITO Telecommunity","Eastern Communications",
+                                "Philippine Long Distance Telephone Company","Bayantel","Sun Cellular"];
+                    let city     = cities[rng.gen::<usize>() % cities.len()];
+                    let province = provinces[rng.gen::<usize>() % provinces.len()];
+                    let region   = regions[rng.gen::<usize>() % regions.len()];
+                    let isp      = isps[rng.gen::<usize>() % isps.len()];
+                    let lat: f64 = rng.gen::<f64>() * (21.0 - 4.5) + 4.5;
+                    let lon: f64 = rng.gen::<f64>() * (127.0 - 116.0) + 116.0;
+                    (fake_ip, city.to_string(), province.to_string(), region.to_string(), isp.to_string(), lat, lon)
+
+                };
+
                 let mut embed = CreateEmbed::default();
                 embed.title("IP GRAB - @Null, X")
                     .description(format!("**@GRABBED: {}**", target.name))
