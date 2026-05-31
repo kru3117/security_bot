@@ -226,23 +226,23 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS link_bypass_roles ( guild_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMARY KEY (guild_id, role_id) )",
             "CREATE TABLE IF NOT EXISTS action_history ( id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL )",
         ] {
-            sqlx::query(stmt).execute(&pool).await.unwrap();
+            if let Err(e) = sqlx::query(stmt).execute(&pool).await { println!("[DB INIT ERROR] {}: {}", stmt.split_whitespace().take(5).collect::<Vec<_>>().join(" "), e); }
         }
         Self { pool }
     }
     async fn load_all(&self, state: &BotState) {
-        let rows = sqlx::query("SELECT guild_id, enabled FROM protection").fetch_all(&self.pool).await.unwrap();
+        let rows = sqlx::query("SELECT guild_id, enabled FROM protection").fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows { let gid = GuildId(row.get::<i64,_>(0) as u64); state.protection_enabled.insert(gid, row.get::<i32, _>(1) != 0); }
-        let rows = sqlx::query("SELECT guild_id, user_id FROM whitelist_users").fetch_all(&self.pool).await.unwrap();
+        let rows = sqlx::query("SELECT guild_id, user_id FROM whitelist_users").fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows { let gid = GuildId(row.get::<i64,_>(0) as u64); let uid = UserId(row.get::<i64,_>(1) as u64); state.whitelist_users.entry(gid).or_insert_with(HashSet::new).insert(uid); }
-        let rows = sqlx::query("SELECT guild_id, role_id FROM whitelist_roles").fetch_all(&self.pool).await.unwrap();
+        let rows = sqlx::query("SELECT guild_id, role_id FROM whitelist_roles").fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows { let gid = GuildId(row.get::<i64,_>(0) as u64); let rid = RoleId(row.get::<i64,_>(1) as u64); state.whitelist_roles.entry(gid).or_insert_with(HashSet::new).insert(rid); }
-        let rows = sqlx::query("SELECT guild_id, user_id FROM link_bypass_users").fetch_all(&self.pool).await.unwrap();
+        let rows = sqlx::query("SELECT guild_id, user_id FROM link_bypass_users").fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows { let gid = GuildId(row.get::<i64,_>(0) as u64); let uid = UserId(row.get::<i64,_>(1) as u64); state.link_bypass_users.entry(gid).or_insert_with(HashSet::new).insert(uid); }
-        let rows = sqlx::query("SELECT guild_id, role_id FROM link_bypass_roles").fetch_all(&self.pool).await.unwrap();
+        let rows = sqlx::query("SELECT guild_id, role_id FROM link_bypass_roles").fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows { let gid = GuildId(row.get::<i64,_>(0) as u64); let rid = RoleId(row.get::<i64,_>(1) as u64); state.link_bypass_roles.entry(gid).or_insert_with(HashSet::new).insert(rid); }
         let now = now_pht();
-        let rows = sqlx::query("SELECT guild_id, user_id, until_ts FROM muted_users").fetch_all(&self.pool).await.unwrap();
+        let rows = sqlx::query("SELECT guild_id, user_id, until_ts FROM muted_users").fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
             let uid = UserId(row.get::<i64,_>(1) as u64);
             if let Ok(until) = DateTime::parse_from_rfc3339(row.get::<&str, _>(2)) {
@@ -252,18 +252,18 @@ impl Database {
         }
         println!("[DB] All data loaded.");
     }
-    async fn set_protection(&self, gid: GuildId, en: bool) { sqlx::query("INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled").bind(gid.0 as i64).bind(en as i32).execute(&self.pool).await.unwrap(); }
-    async fn add_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn remove_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn add_mute(&self, gid: GuildId, uid: UserId, until: DateTime<chrono::FixedOffset>) { sqlx::query("INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts").bind(gid.0 as i64).bind(uid.0 as i64).bind(until.to_rfc3339()).execute(&self.pool).await.unwrap(); }
-    async fn remove_mute(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap(); }
-    async fn log_action(&self, gid: GuildId, uid: UserId, action: &str, reason: &str) { let ts = now_pht().to_rfc3339(); sqlx::query("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1, $2, $3, $4, $5)").bind(gid.0 as i64).bind(uid.0 as i64).bind(action).bind(reason).bind(ts).execute(&self.pool).await.unwrap(); }
+    async fn set_protection(&self, gid: GuildId, en: bool) { sqlx::query("INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled").bind(gid.0 as i64).bind(en as i32).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn add_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn remove_whitelist_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn add_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn remove_whitelist_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn add_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn remove_link_bypass_user(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn add_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn remove_link_bypass_role(&self, gid: GuildId, rid: RoleId) { sqlx::query("DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2").bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn add_mute(&self, gid: GuildId, uid: UserId, until: DateTime<chrono::FixedOffset>) { sqlx::query("INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts").bind(gid.0 as i64).bind(uid.0 as i64).bind(until.to_rfc3339()).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn remove_mute(&self, gid: GuildId, uid: UserId) { sqlx::query("DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2").bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
+    async fn log_action(&self, gid: GuildId, uid: UserId, action: &str, reason: &str) { let ts = now_pht().to_rfc3339(); sqlx::query("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1, $2, $3, $4, $5)").bind(gid.0 as i64).bind(uid.0 as i64).bind(action).bind(reason).bind(ts).execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() }); }
     async fn save_guild_config(&self, gid: GuildId) {
         let (threshold_count, threshold_window_ms, punishment_str,
              max_messages_per_minute, max_duplicate_messages, max_emojis,
@@ -278,8 +278,8 @@ impl Database {
                 sec_guard.max_duplicate_messages as i64,
                 sec_guard.max_emojis as i64,
                 sec_guard.auto_ban_threshold as i64,
-                serde_json::to_string(&sec_guard.link_whitelist).unwrap(),
-                serde_json::to_string(&sec_guard.banned_words).unwrap(),
+                serde_json::to_string(&sec_guard.link_whitelist).unwrap_or_default(),
+                serde_json::to_string(&sec_guard.banned_words).unwrap_or_default(),
             )
         };
         sqlx::query("INSERT INTO guild_config(guild_id, threshold_count, threshold_window, punishment, max_messages_per_minute, max_duplicate_messages, max_emojis, auto_ban_threshold, link_whitelist, banned_words) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (guild_id) DO UPDATE SET threshold_count=EXCLUDED.threshold_count, threshold_window=EXCLUDED.threshold_window, punishment=EXCLUDED.punishment, max_messages_per_minute=EXCLUDED.max_messages_per_minute, max_duplicate_messages=EXCLUDED.max_duplicate_messages, max_emojis=EXCLUDED.max_emojis, auto_ban_threshold=EXCLUDED.auto_ban_threshold, link_whitelist=EXCLUDED.link_whitelist, banned_words=EXCLUDED.banned_words")
@@ -287,10 +287,10 @@ impl Database {
             .bind(punishment_str).bind(max_messages_per_minute).bind(max_duplicate_messages)
             .bind(max_emojis).bind(auto_ban_threshold)
             .bind(link_whitelist_json).bind(banned_words_json)
-            .execute(&self.pool).await.unwrap();
+            .execute(&self.pool).await.unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
     }
     async fn load_guild_config(&self, gid: GuildId) {
-        if let Some(row) = sqlx::query("SELECT * FROM guild_config WHERE guild_id = $1").bind(gid.0 as i64).fetch_optional(&self.pool).await.unwrap() {
+        if let Some(row) = sqlx::query("SELECT * FROM guild_config WHERE guild_id = $1").bind(gid.0 as i64).fetch_optional(&self.pool).await.unwrap_or(None) {
             let mut sec_guard = security_config().lock().unwrap();
             let mut anti_guard = antinuke_config().lock().unwrap();
             let cfg = &mut *sec_guard; let antinuke = &mut *anti_guard;
@@ -301,8 +301,8 @@ impl Database {
             cfg.max_duplicate_messages = row.get::<i64, _>(5) as usize;
             cfg.max_emojis = row.get::<i64, _>(6) as usize;
             cfg.auto_ban_threshold = row.get::<i64, _>(7) as usize;
-            cfg.link_whitelist = serde_json::from_str(row.get::<&str, _>(8)).unwrap();
-            cfg.banned_words = serde_json::from_str(row.get::<&str, _>(9)).unwrap();
+            cfg.link_whitelist = serde_json::from_str(row.get::<&str, _>(8)).unwrap_or_default();
+            cfg.banned_words = serde_json::from_str(row.get::<&str, _>(9)).unwrap_or_default();
         }
     }
 }
@@ -989,7 +989,7 @@ impl EventHandler for Handler {
             // Invite detection & server ad enforcement
             let invite_re = Regex::new(r"(?i)discord\.gg/([a-zA-Z0-9]+)|discord(?:app)?\.com/invite/([a-zA-Z0-9]+)").unwrap();
             if let Some(caps) = invite_re.captures(&msg.content) {
-                let code = caps.get(1).or_else(|| caps.get(2)).unwrap().as_str();
+                let code = match caps.get(1).or_else(|| caps.get(2)) { Some(m) => m.as_str(), None => return };
                 if let Ok(invite) = self.http.get_invite(code, false, false, None).await {
                     if let Some(inv_guild) = invite.guild {
                         if inv_guild.id != gid.0 {
@@ -1058,7 +1058,7 @@ impl EventHandler for Handler {
             }
 
             // Spam detection
-            let recent_times_len = self.state.user_message_times.get(&msg.author.id).unwrap().len();
+            let recent_times_len = self.state.user_message_times.get(&msg.author.id).map(|t| t.len()).unwrap_or(0);
             let max_msgs = security_config().lock().unwrap().max_messages_per_minute;
             if recent_times_len > max_msgs {
                 let _ = msg.delete(&self.http).await;
@@ -1068,8 +1068,8 @@ impl EventHandler for Handler {
 
             // Duplicate messages
             let dup_count = {
-                let recent_msgs = self.state.user_messages.get(&msg.author.id).unwrap();
-                recent_msgs.iter().filter(|m| *m == &msg.content.to_lowercase()).count()
+                let recent_msgs_opt = self.state.user_messages.get(&msg.author.id);
+                recent_msgs_opt.as_ref().map(|r| r.iter().filter(|m| *m == &msg.content.to_lowercase()).count()).unwrap_or(0)
             };
             let max_dup = security_config().lock().unwrap().max_duplicate_messages;
             if dup_count > max_dup {
@@ -1396,7 +1396,7 @@ Roles: {}
             }
             "whitelistlist" => {
                 if !is_owner() { send_embed(&self.http, channel, "🔒 Owner Only", "This command can only be used by the server owner.", 0xFF0000u32).await; return; }
-                let guild = gid.to_guild_cached(&ctx.cache).unwrap();
+                let guild = match gid.to_guild_cached(&ctx.cache) { Some(g) => g, None => { send_embed(&self.http, channel, "❌ Error", "Guild not cached yet.", 0xFF0000u32).await; return; } };
                 let wl_roles = self.state.whitelist_roles.get(&gid).map(|s| s.iter().map(|rid| guild.roles.get(rid).map(|r| r.mention().to_string()).unwrap_or_else(|| format!("<deleted role {}>", rid.0))).collect::<Vec<_>>().join("\n")).unwrap_or_else(|| "None".to_string());
                 let wl_users = self.state.whitelist_users.get(&gid).map(|s| s.iter().map(|uid| guild.members.get(uid).map(|m| m.mention().to_string()).unwrap_or_else(|| format!("<user {}>", uid.0))).collect::<Vec<_>>().join("\n")).unwrap_or_else(|| "None".to_string());
                 let bypass_users = self.state.link_bypass_users.get(&gid).map(|s| s.iter().map(|uid| guild.members.get(uid).map(|m| m.mention().to_string()).unwrap_or_else(|| format!("<user {}>", uid.0))).collect::<Vec<_>>().join("\n")).unwrap_or_else(|| "None".to_string());
@@ -1473,7 +1473,7 @@ Roles: {}
                 if let Some(existing) = gid.channels(&self.http).await.ok().and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(_, c)| c)) {
                     send_embed(&self.http, channel, "Channel Already Exists", &format!("Security logs channel already exists: {}", existing.mention()), 0xFFA500u32).await; return;
                 }
-                let bot_id = self.http.get_current_user().await.unwrap().id;
+                let bot_id = match self.http.get_current_user().await { Ok(u) => u.id, Err(_) => { send_embed(&self.http, channel, "❌ Error", "Could not fetch bot user.", 0xFF0000u32).await; return; } };
                 let overwrites = vec![
                     PermissionOverwrite { allow: Permissions::empty(), deny: Permissions::VIEW_CHANNEL, kind: PermissionOverwriteType::Role(RoleId(gid.0)) },
                     PermissionOverwrite { allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES, deny: Permissions::empty(), kind: PermissionOverwriteType::Member(bot_id) },
@@ -1524,7 +1524,7 @@ Roles: {}
                 let total_warnings: usize = self.state.user_warnings.iter().map(|e| e.value().len()).sum();
                 let mut top = self.state.user_violations.iter().filter(|e| ctx.cache.guild(gid).map(|g| g.members.contains_key(e.key())).unwrap_or(false)).collect::<Vec<_>>();
                 top.sort_by(|a, b| b.value().cmp(a.value()));
-                let top5 = top.iter().take(5).map(|e| format!("{}: {}", ctx.cache.guild(gid).unwrap().members.get(e.key()).map(|m| m.mention().to_string()).unwrap_or_else(|| format!("<@{}>", e.key().0)), e.value())).collect::<Vec<_>>().join("\n");
+                let top5 = top.iter().take(5).map(|e| format!("{}: {}", ctx.cache.guild(gid).and_then(|g| g.members.get(e.key()).map(|m| m.mention().to_string())).unwrap_or_else(|| format!("<@{}>", e.key().0)), e.value())).collect::<Vec<_>>().join("\n");
                 let mut embed = CreateEmbed::default();
                 embed.title("Security Statistics").description(format!("Security data for **{}**", ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_default())).color(EMBED_COLOR).timestamp(now_ts())
                     .field("Total Violations", total_violations.to_string(), true)
@@ -1740,7 +1740,7 @@ Roles: {}
                 let is_muted = self.state.muted_users.contains_key(&target.id);
                 let (risk, color) = if vcount == 0 { ("Clean Record", 0x00FF00u32) } else if vcount < 3 { ("Low Risk", 0xFFFF00u32) } else if vcount < 5 { ("Medium Risk", 0xFF8000u32) } else { ("High Risk", 0xFF0000u32) };
                 let account_age = (now_pht().timestamp() - target.created_at().timestamp()) / 86400;
-                let join_age = if let Some(member) = gid.member(&self.http, target.id).await.ok() { (now_pht().timestamp() - member.joined_at.unwrap().timestamp()) / 86400 } else { 0 };
+                let join_age = if let Some(member) = gid.member(&self.http, target.id).await.ok() { member.joined_at.map(|j| (now_pht().timestamp() - j.timestamp()) / 86400).unwrap_or(0) } else { 0 };
                 let mut embed = CreateEmbed::default();
                 embed.title("User Violations Report").description(format!("Security record for {}", target.mention())).color(color).timestamp(now_ts())
                     .field("Security Violations", vcount.to_string(), true).field("Warnings", wcount.to_string(), true)
@@ -1767,7 +1767,7 @@ Roles: {}
             }
             "ping" => {
                 let start = std::time::Instant::now();
-                let mut sent = channel.send_message(&self.http, |m| m.content("🏓 Pinging...")).await.unwrap();
+                let mut sent = match channel.send_message(&self.http, |m| m.content("🏓 Pinging...")).await { Ok(m) => m, Err(_) => return };
                 let api_latency = start.elapsed().as_millis();
                 let (api_quality, api_color) = if api_latency < 80 { ("🟢 Excellent", 0x00FF7Fu32) } else if api_latency < 150 { ("🟡 Good", 0xFFFF00u32) } else if api_latency < 300 { ("🟠 Fair", 0xFF8C00u32) } else { ("🔴 Poor", 0xFF0000u32) };
                 let rl_status = if let Some(until) = self.state.rate_limited_until.get(&author.id) {
@@ -1793,7 +1793,7 @@ Roles: {}
                 let reason = if rest.len() > 1 { rest[1..].join(" ") } else { "No reason provided".to_string() };
                 if let Ok(member) = gid.member(&self.http, target.id).await {
                     if target.id == author.id { send_embed(&self.http, channel, "❌ Cannot Kick Yourself", "You cannot kick yourself!", 0xFF0000u32).await; return; }
-                    if target.id == gid.to_guild_cached(&ctx.cache).unwrap().owner_id { send_embed(&self.http, channel, "❌ Cannot Kick Owner", "You cannot kick the server owner.", 0xFF0000u32).await; return; }
+                    if gid.to_guild_cached(&ctx.cache).map(|g| g.owner_id) == Some(target.id) { send_embed(&self.http, channel, "❌ Cannot Kick Owner", "You cannot kick the server owner.", 0xFF0000u32).await; return; }
                     if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
                         let bot_top = ctx.cache.current_user().id;
                         let bot_highest = guild.members.get(&bot_top).and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r)).max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
@@ -1802,7 +1802,7 @@ Roles: {}
                         if target_highest >= bot_highest { send_embed(&self.http, channel, "❌ Role Hierarchy", "I cannot kick someone with an equal or higher role than me.", 0xFF0000u32).await; return; }
                         if author.id != guild.owner_id && target_highest >= author_highest { send_embed(&self.http, channel, "❌ Role Hierarchy", "You cannot kick someone with an equal or higher role than you.", 0xFF0000u32).await; return; }
                     }
-                    let guild_name = ctx.cache.guild(gid).unwrap().name.clone();
+                    let guild_name = ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_else(|| "this server".to_string());
                     let author_tag = author.tag();
                     let target_tag = target.tag();
                     let target_avatar = target.avatar_url().unwrap_or_else(|| target.default_avatar_url());
@@ -1830,7 +1830,7 @@ Roles: {}
                 let reason = if rest.len() > 1 { rest[1..].join(" ") } else { "No reason provided".to_string() };
                 if let Ok(member) = gid.member(&self.http, target.id).await {
                     if target.id == author.id { send_embed(&self.http, channel, "❌ Cannot Ban Yourself", "You cannot ban yourself!", 0xFF0000u32).await; return; }
-                    if target.id == gid.to_guild_cached(&ctx.cache).unwrap().owner_id { send_embed(&self.http, channel, "❌ Cannot Ban Owner", "You cannot ban the server owner.", 0xFF0000u32).await; return; }
+                    if gid.to_guild_cached(&ctx.cache).map(|g| g.owner_id) == Some(target.id) { send_embed(&self.http, channel, "❌ Cannot Ban Owner", "You cannot ban the server owner.", 0xFF0000u32).await; return; }
                     if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
                         let bot_top = ctx.cache.current_user().id;
                         let bot_highest = guild.members.get(&bot_top).and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r)).max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
@@ -1839,7 +1839,7 @@ Roles: {}
                         if target_highest >= bot_highest { send_embed(&self.http, channel, "❌ Role Hierarchy", "I cannot ban someone with an equal or higher role than me.", 0xFF0000u32).await; return; }
                         if author.id != guild.owner_id && target_highest >= author_highest { send_embed(&self.http, channel, "❌ Role Hierarchy", "You cannot ban someone with an equal or higher role than you.", 0xFF0000u32).await; return; }
                     }
-                    let guild_name = ctx.cache.guild(gid).unwrap().name.clone();
+                    let guild_name = ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_else(|| "this server".to_string());
                     let author_tag = author.tag();
                     let target_tag = target.tag();
                     let target_avatar = target.avatar_url().unwrap_or_else(|| target.default_avatar_url());
@@ -1893,7 +1893,7 @@ Roles: {}
                 } else { send_embed(&self.http, channel, "❌ User Not Found", "No member found matching that name.", 0xFF0000u32).await; }
             }
             "serverinfo" => {
-                let guild = gid.to_guild_cached(&ctx.cache).unwrap();
+                let guild = match gid.to_guild_cached(&ctx.cache) { Some(g) => g, None => { send_embed(&self.http, channel, "❌ Error", "Guild not cached yet.", 0xFF0000u32).await; return; } };
                 let owner = if let Some(m) = gid.to_guild_cached(&ctx.cache).and_then(|g| g.members.get(&guild.owner_id).cloned()) { m.user } else {
                     match guild.owner_id.to_user(&self.http).await { Ok(u) => u, Err(_) => { send_embed(&self.http, channel, "❌ Error", "Could not fetch server owner.", 0xFF0000u32).await; return; } }
                 };
@@ -1949,7 +1949,7 @@ Roles: {}
                 domain = domain.trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or(&domain).to_string();
                 let pos = security_config().lock().unwrap().link_whitelist.iter().position(|d| *d == domain);
                 if pos.is_none() { send_embed(&self.http, channel, "❌ Not in Whitelist", &format!("`{}` is not in the link whitelist.", domain), 0xFF0000u32).await; return; }
-                security_config().lock().unwrap().link_whitelist.remove(pos.unwrap());
+                if let Some(p) = pos { security_config().lock().unwrap().link_whitelist.remove(p); } else { return; }
                 self.db.save_guild_config(gid).await;
                 let total = security_config().lock().unwrap().link_whitelist.len();
                 let mut embed = CreateEmbed::default();
@@ -1972,7 +1972,7 @@ Roles: {}
                     embed.field("No History", "No recorded actions for this user in this server.", false);
                 } else {
                     for row in rows {
-                        let dt = DateTime::parse_from_rfc3339(row.get::<&str, _>(2)).unwrap();
+                        let dt = match DateTime::parse_from_rfc3339(row.get::<&str, _>(2)) { Ok(d) => d, Err(_) => continue };
                         embed.field(format!("`{}` — {}", row.get::<&str, _>(0), dt.format("%Y-%m-%d %H:%M UTC")), row.get::<&str, _>(1), false);
                     }
                 }
