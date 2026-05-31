@@ -838,7 +838,9 @@ async fn snapshot_all(state: &BotState, http: &Http, guild: &Guild) {
     state.guild_snapshots.insert(guild.id, snap_guild(guild));
     // FIX #5: guild.channels is HashMap<ChannelId, GuildChannel> in serenity 0.11.7
     for (id, ch) in guild.channels.iter() {
-        state.channel_snapshots.insert(*id, snap_channel(ch));
+        if let Some(guild_ch) = ch.clone().guild() {
+            state.channel_snapshots.insert(*id, snap_channel(&guild_ch));
+        }
     }
     for (id, role) in guild.roles.iter() {
         state.role_snapshots.insert(*id, snap_role(role));
@@ -1075,8 +1077,9 @@ impl EventHandler for Handler {
     }
 
     // FIX: channel_update signature uses Option<GuildChannel> and GuildChannel directly
-    async fn channel_update(&self, ctx: Context, old: Option<Channel>, new: GuildChannel) {
+    async fn channel_update(&self, ctx: Context, old: Option<Channel>, new: Channel) {
         let old = match old.and_then(|c| c.guild()) { Some(o) => o, None => return };
+        let new = match new.guild() { Some(n) => n, None => return };
         let gid = new.guild_id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.channel_snapshots.insert(new.id, snap_channel(&new));
