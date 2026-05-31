@@ -3355,7 +3355,7 @@ async fn main() {
     db.load_all(&state).await;
     let http = Arc::new(Http::new(&token));
     let handler = Handler { state, db, http };
-    let mut client = Client::builder(&token, GatewayIntents::all() & !GatewayIntents::GUILD_PRESENCES & !GatewayIntents::GUILD_MEMBERS)
+    let mut client = Client::builder(&token, GatewayIntents::all())
         .event_handler(handler)
         .await
         .expect("Error creating client");
