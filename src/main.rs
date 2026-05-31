@@ -938,8 +938,12 @@ impl EventHandler for Handler {
             else { self.state.muted_users.remove(&msg.author.id); }
         }
 
-        // Commands dispatched first before security filtering
-        let is_cmd = msg.content.starts_with('x') || msg.content.starts_with("null");
+        // Commands dispatched first before security filtering.
+        // Match Python: prefixes are "null" and "x". "x" only triggers if followed by a letter (xban, xkick etc.)
+        // This prevents normal chat messages like "xd" or "x" from being swallowed.
+        let cl = msg.content.to_lowercase();
+        let is_cmd = cl.starts_with("null") ||
+            (cl.starts_with('x') && cl.len() > 1 && cl.chars().nth(1).map(|c| c.is_ascii_alphabetic()).unwrap_or(false));
         if is_cmd {
             // Rate limiting
             if let Some(until) = self.state.rate_limited_until.get(&msg.author.id) {
@@ -1122,9 +1126,12 @@ impl EventHandler for Handler {
 impl Handler {
     async fn process_commands(&self, ctx: Context, msg: &Message) {
         let content = &msg.content;
-        if !(content.starts_with('x') || content.starts_with("null")) { return; }
-        let prefix = if content.starts_with('x') { "x" } else { "null" };
-        let args: Vec<&str> = content[prefix.len()..].trim().split_whitespace().collect();
+        let cl2 = content.to_lowercase();
+        // Determine prefix — check "null" before "x" since "null" doesn't start with "x"
+        let prefix_len = if cl2.starts_with("null") { 4 } else if cl2.starts_with('x') { 1 } else { return; };
+        // Split remaining text into args: first token is the command name, rest are arguments
+        let after_prefix = content[prefix_len..].trim();
+        let args: Vec<&str> = after_prefix.split_whitespace().collect();
         let cmd = args.first().unwrap_or(&"").to_lowercase();
         let rest = &args[1..];
         let gid = match msg.guild_id { Some(g) => g, None => return };
