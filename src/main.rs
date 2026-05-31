@@ -1813,7 +1813,9 @@ impl Handler {
                 let setting = rest[0].to_lowercase();
                 if ["on","enable","true","1"].contains(&setting.as_str()) {
                     self.state.protection_enabled.insert(gid, true);
+                    println!("[DEBUG] antinuke enabled, sending embed");
                     self.db.set_protection(gid, true).await;
+                    println!("[DEBUG] db done");
                     let mut embed = CreateEmbed::default();
                     embed.title("Protection Enabled")
                         .description("Anti-Nuke + Security protection is now **ACTIVE**")
