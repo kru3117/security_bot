@@ -36,7 +36,7 @@ use std::{
 };
 
 // ------------------------------------------------------------
-//  ENUM CONVERSION HELPERS (fixes .num() calls on Serenity enums)
+//  ENUM CONVERSION HELPERS
 // ------------------------------------------------------------
 fn verification_level_to_u16(vl: serenity::model::guild::VerificationLevel) -> u16 {
     use serenity::model::guild::VerificationLevel::*;
@@ -54,7 +54,8 @@ fn explicit_filter_to_u16(e: serenity::model::guild::ExplicitContentFilter) -> u
 }
 fn premium_tier_num(t: serenity::model::guild::PremiumTier) -> u8 {
     use serenity::model::guild::PremiumTier::*;
-    match t { None => 0, Tier1 => 1, Tier2 => 2, Tier3 => 3, _ => 0 }
+    // FIX #3: removed None arm — not a valid variant in serenity 0.11.7
+    match t { Tier1 => 1, Tier2 => 2, Tier3 => 3, _ => 0 }
 }
 
 // ------------------------------------------------------------
@@ -189,7 +190,6 @@ struct WarningData {
     guild_id: GuildId,
 }
 
-// FIX #4: flattened to Vec<PermissionOverwrite> — kind already lives inside each overwrite
 #[derive(Clone)]
 struct ChannelSnapshot {
     name: String,
@@ -517,7 +517,6 @@ async fn is_link_bypassed(state: &BotState, http: &Http, cache: &Cache, gid: Gui
     false
 }
 
-// FIX #2: use conversion helpers instead of .num()
 fn snap_guild(guild: &Guild) -> GuildSnapshot {
     GuildSnapshot {
         name: guild.name.clone(),
@@ -543,12 +542,11 @@ fn snap_partial_guild(guild: &serenity::model::guild::PartialGuild) -> GuildSnap
         afk_timeout: guild.afk_timeout,
         verification_level: verification_level_to_u16(guild.verification_level),
         default_notifications: notification_level_to_u16(guild.default_message_notifications),
-        explicit_content_filter: 0u16, // PartialGuild doesn't expose this
+        explicit_content_filter: 0u16,
         system_channel_id: guild.system_channel_id,
     }
 }
 
-// FIX #4: overwrites is now Vec<PermissionOverwrite> directly
 fn snap_channel(channel: &GuildChannel) -> ChannelSnapshot {
     ChannelSnapshot {
         name: channel.name.clone(),
@@ -578,7 +576,6 @@ async fn build_permission_map(state: &BotState, http: &Http, cache: &Cache, gid:
     for member in guild.members.values() {
         if member.user.bot { continue; }
         if is_whitelisted(state, http, cache, gid, member.user.id).await { continue; }
-        // FIX #11: compute permissions manually — Member::permissions takes &impl CacheHttp
         let mut perms = Permissions::empty();
         if let Some(everyone) = guild.roles.get(&RoleId(gid.0)) {
             perms |= everyone.permissions;
@@ -837,9 +834,9 @@ async fn restore_role(
     Some(new_role.id)
 }
 
-// FIX #5 & #8: guild.channels is HashMap<ChannelId, GuildChannel> in serenity 0.11.7
 async fn snapshot_all(state: &BotState, http: &Http, guild: &Guild) {
     state.guild_snapshots.insert(guild.id, snap_guild(guild));
+    // FIX #5: guild.channels is HashMap<ChannelId, GuildChannel> in serenity 0.11.7
     for (id, ch) in guild.channels.iter() {
         state.channel_snapshots.insert(*id, snap_channel(ch));
     }
@@ -1077,13 +1074,9 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn channel_update(&self, ctx: Context, old: Option<Channel>, new: Channel) {
-        let (old_ch, new_ch) = match (old, new) {
-            (Some(Channel::Guild(o)), Channel::Guild(n)) => (o, n),
-            _ => return,
-        };
-        let old = old_ch;
-        let new = new_ch;
+    // FIX: channel_update signature uses Option<GuildChannel> and GuildChannel directly
+    async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
+        let old = match old { Some(o) => o, None => return };
         let gid = new.guild_id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.channel_snapshots.insert(new.id, snap_channel(&new));
@@ -1178,7 +1171,7 @@ impl EventHandler for Handler {
                         let sverif = s.verification_level;
                         let snotif = s.default_notifications;
                         let secf = s.explicit_content_filter;
-                        // FIX #12: gid is Copy — no `mut` needed
+                        // FIX #12: gid is Copy — no mut needed
                         let _ = gid.edit(&http, |e| {
                             use serenity::model::guild::{
                                 DefaultMessageNotificationLevel, ExplicitContentFilter,
@@ -1450,7 +1443,6 @@ impl EventHandler for Handler {
         let gid = match msg.guild_id { Some(g) => g, None => return };
         let now = now_pht();
 
-        // Muted check
         if let Some(until) = self.state.muted_users.get(&msg.author.id) {
             if now < *until { let _ = msg.delete(&self.http).await; return; }
             else { self.state.muted_users.remove(&msg.author.id); }
@@ -1743,7 +1735,7 @@ impl Handler {
         };
         drop(guild);
 
-        // FIX #11: manual permission computation — no Member::permissions(&cache) call
+        // FIX #11: manual permission computation
         let effective_perms = if let Some(g) = gid.to_guild_cached(&ctx.cache) {
             let mut perms = Permissions::empty();
             if let Some(everyone) = g.roles.get(&RoleId(gid.0)) {
@@ -2372,7 +2364,6 @@ impl Handler {
                         "You cannot warn yourself!", 0xFF0000u32).await;
                     return;
                 }
-                // FIX #11: manual perms check
                 if let Ok(tmember) = gid.member(&self.http, target.id).await {
                     if let Some(g) = gid.to_guild_cached(&ctx.cache) {
                         let mut tperms = Permissions::empty();
@@ -2439,7 +2430,6 @@ impl Handler {
                         "You cannot mute yourself!", 0xFF0000u32).await;
                     return;
                 }
-                // FIX #11: manual perms check
                 if let Ok(tmember) = gid.member(&self.http, target.id).await {
                     if let Some(g) = gid.to_guild_cached(&ctx.cache) {
                         let mut tperms = Permissions::empty();
@@ -3115,15 +3105,16 @@ impl Handler {
                     else if days >= 30 { format!("{} month(s) ago", days / 30) }
                     else { format!("{} day(s) ago", days) };
                 let created_str = format!("{} ({})", created.format("%B %d, %Y at %I:%M %p"), relative);
-                // FIX #5: guild.channels is HashMap<ChannelId, GuildChannel> directly
-                let text  = guild.channels.values().filter(|c| c.kind == ChannelType::Text).count();
-                let voice = guild.channels.values().filter(|c| c.kind == ChannelType::Voice).count();
-                let cats  = guild.channels.values().filter(|c| c.kind == ChannelType::Category).count();
+                // FIX #5: pull channels from HTTP — cache GuildRef doesn't expose .channels in 0.11.7
+                let channels = gid.channels(&self.http).await.unwrap_or_default();
+                let text  = channels.values().filter(|c| c.kind == ChannelType::Text).count();
+                let voice = channels.values().filter(|c| c.kind == ChannelType::Voice).count();
+                let cats  = channels.values().filter(|c| c.kind == ChannelType::Category).count();
                 let total_ch = text + voice;
                 let bots = guild.members.values().filter(|m| m.user.bot).count();
                 let boost_level = guild.premium_tier;
                 let boost_count = guild.premium_subscription_count;
-                // FIX #3: use premium_tier_num() helper
+                // FIX #3: use premium_tier_num() — PremiumTier::None removed
                 let boost_str = format!("{} Boost{} (Level {})",
                     boost_count,
                     if boost_count != 1 { "s" } else { "" },
