@@ -748,6 +748,7 @@ impl EventHandler for Handler {
             let http = self.http.clone(); let state = self.state.clone();
             instant_ban_and_rollback(self.state.clone(), self.db.clone(), self.http.clone(), ctx.cache.clone(), gid, actor, "Unauthorized guild settings change", async move {
                 if let Some(s) = snap {
+                    let mut gid = gid;
                     let sname = s.name.clone();
                     let sdesc = s.description.clone();
                     let safk_timeout = s.afk_timeout;
