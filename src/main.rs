@@ -53,7 +53,6 @@ use dashmap::{DashMap, DashSet};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use regex::Regex;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use reqwest;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
