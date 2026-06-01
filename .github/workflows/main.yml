@@ -22,6 +22,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Ensure clippy and rustfmt are present
+        run: |
+          rustup component add clippy rustfmt
+
       - name: Cache cargo registry and build
         uses: actions/cache@v4
         with:
@@ -32,11 +36,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-
-      - name: Generate sqlx offline data (first run only — skip on cache hit)
-        run: |
-          cargo install sqlx-cli --no-default-features --features postgres,rustls 2>/dev/null || true
-          mkdir -p .sqlx
 
       - name: Run cargo check
         run: cargo check --release
