@@ -1,9 +1,10 @@
 // ============================================================
 //  REXZ-STYLE ANTI-NUKE BOT – FULLY FEATURED
-//  Complete merged version: all original commands + new protections
+//  Complete version with all commands adapted to per‑guild config
 // ============================================================
 #![allow(unused_variables)]
 #![allow(dead_code)]
+#![recursion_limit = "256"]
 
 use serenity::{
     async_trait,
@@ -20,7 +21,6 @@ use serenity::{
         prelude::*,
         user::User,
         Timestamp,
-        emoji::Emoji,
     },
 };
 use tokio::sync::Semaphore;
@@ -36,6 +36,7 @@ use std::{
     time::Duration,
 };
 use poise::serenity_prelude as serenity_poise;
+use poise::serenity_prelude::Mentionable;
 use rand::Rng;
 
 // ------------------------------------------------------------
@@ -260,7 +261,6 @@ struct BotState {
     guild_snapshots: DashMap<GuildId, GuildSnapshot>,
     channel_snapshots: DashMap<ChannelId, ChannelSnapshot>,
     role_snapshots: DashMap<RoleId, RoleSnapshot>,
-    emoji_snapshots: DashMap<GuildId, DashMap<String, Emoji>>,
     server_ad_registry: DashMap<GuildId, DashMap<UserId, ServerAdEntry>>,
     ad_spam_channels: DashMap<GuildId, DashMap<UserId, Vec<ChannelId>>>,
     api_semaphore: Arc<Semaphore>,
@@ -299,7 +299,6 @@ impl BotState {
             guild_snapshots: DashMap::new(),
             channel_snapshots: DashMap::new(),
             role_snapshots: DashMap::new(),
-            emoji_snapshots: DashMap::new(),
             server_ad_registry: DashMap::new(),
             ad_spam_channels: DashMap::new(),
             api_semaphore: Arc::new(Semaphore::new(20)),
@@ -533,7 +532,7 @@ impl Database {
 }
 
 // ------------------------------------------------------------
-//  HELPERS (Whitelist, Snapshots, Mass action detection, etc.)
+//  HELPERS
 // ------------------------------------------------------------
 async fn is_whitelisted(state: &BotState, http: &Http, cache: &Cache, gid: GuildId, uid: UserId) -> bool {
     if let Ok(current) = http.get_current_user().await {
@@ -620,15 +619,6 @@ fn snap_role(role: &Role) -> RoleSnapshot {
     }
 }
 
-async fn take_emoji_snapshot(state: &BotState, http: &Http, gid: GuildId, cache: &Cache) {
-    if let Some(guild) = gid.to_guild_cached(cache) {
-        let map = state.emoji_snapshots.entry(gid).or_insert_with(DashMap::new);
-        for emoji in guild.emojis.values() {
-            map.insert(emoji.name.clone(), emoji.clone());
-        }
-    }
-}
-
 async fn build_permission_map(state: &BotState, http: &Http, cache: &Cache, gid: GuildId) {
     let guild = match gid.to_guild_cached(cache) { Some(g) => g, None => return };
     let mut dangerous = HashSet::new();
@@ -694,7 +684,7 @@ async fn get_actor_fast(
         "channel_update" => 11, "role_create" => 30,
         "role_delete" => 32, "role_update" => 31,
         "guild_update" => 1, "webhook_create" => 50,
-        "emoji_delete" => 62, "member_unban" => 23,
+        "member_unban" => 23,
         _ => return None,
     };
     if let Ok(logs) = gid.audit_logs(http, Some(action_type), None, None, Some(3)).await {
@@ -722,7 +712,7 @@ async fn log_violation(
     let mut count = state.user_violations.entry(user.id).or_insert(0);
     *count += 1;
     let total = *count;
-    let cfg = state.guild_configs.get(&gid).cloned().unwrap_or_default();
+    let cfg = state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
     let auto_ban_threshold = cfg.auto_ban_threshold;
 
     let user_mention = user.mention();
@@ -792,7 +782,7 @@ async fn check_mass_action(
 ) {
     if !state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) { return; }
     if is_whitelisted(state, http, cache, gid, actor).await { return; }
-    let cfg = state.guild_configs.get(&gid).cloned().unwrap_or_default();
+    let cfg = state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
     let (threshold, window_secs) = match action_type {
         "Ban" => (cfg.mass_ban_threshold, cfg.mass_ban_window_secs),
         "Kick" => (cfg.mass_kick_threshold, cfg.mass_kick_window_secs),
@@ -890,7 +880,6 @@ async fn snapshot_all(state: &BotState, http: &Http, guild: &Guild) {
     for (id, role) in guild.roles.iter() {
         state.role_snapshots.insert(*id, snap_role(role));
     }
-    take_emoji_snapshot(state, http, guild.id, &guild.cache()).await;
 }
 
 async fn poll_audit_logs(state: Arc<BotState>, http: Arc<Http>, cache: Arc<Cache>, gid: GuildId) {
@@ -898,7 +887,7 @@ async fn poll_audit_logs(state: Arc<BotState>, http: Arc<Http>, cache: Arc<Cache
         "channel_delete", "channel_create", "channel_update",
         "role_create", "role_delete", "role_update",
         "guild_update", "webhook_create", "ban", "kick", "member_role_update",
-        "emoji_delete", "member_unban",
+        "member_unban",
     ];
     loop {
         for act in actions {
@@ -1397,33 +1386,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_emojis_update(
-        &self, ctx: Context, guild_id: GuildId,
-        _current_state: Option<Vec<Emoji>>, _added: Vec<Emoji>, removed: Vec<Emoji>,
-    ) {
-        if !self.state.protection_enabled.get(&guild_id).map(|e| *e).unwrap_or(false) { return; }
-        if removed.is_empty() { return; }
-        if let Some(actor) = get_actor_fast(&self.state, &self.http, &ctx.cache, guild_id, "emoji_delete").await {
-            if is_whitelisted(&self.state, &self.http, &ctx.cache, guild_id, actor).await {
-                take_emoji_snapshot(&self.state, &self.http, guild_id, &ctx.cache).await;
-                return;
-            }
-            let _ = guild_id.ban_with_reason(&self.http, actor, 0, "[Anti-Nuke] Unauthorized emoji deletion").await;
-            if let Some(log_id) = guild_id.channels(&self.http).await.ok()
-                .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
-            {
-                let mut embed = CreateEmbed::default();
-                embed.title("🚨 ANTI-NUKE — EMOJI DELETION").color(0xFF0000u32).timestamp(now_ts())
-                    .field("Actor", format!("`{}`", actor.0), true)
-                    .field("Action", format!("Deleted {} emojis", removed.len()), true)
-                    .field("Punishment", "Actor banned", true);
-                let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-            }
-        } else {
-            take_emoji_snapshot(&self.state, &self.http, guild_id, &ctx.cache).await;
-        }
-    }
-
+    // Unban protection
     async fn guild_ban_removal(&self, ctx: Context, guild_id: GuildId, user: User) {
         if !self.state.protection_enabled.get(&guild_id).map(|e| *e).unwrap_or(false) { return; }
         if let Ok(logs) = guild_id.audit_logs(&self.http, Some(23), None, None, Some(5)).await {
@@ -1532,7 +1495,7 @@ impl EventHandler for Handler {
         build_permission_map(&self.state, &self.http, &ctx.cache, gid).await;
     }
 
-    // Message handler – now using per-guild config
+    // Message handler – using per-guild config
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.bot { return; }
         let gid = match msg.guild_id { Some(g) => g, None => return };
@@ -1597,7 +1560,7 @@ impl EventHandler for Handler {
         if self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => return };
             let link_bypassed = is_link_bypassed(&self.state, &self.http, &ctx.cache, gid, &member).await;
-            let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
+            let cfg = self.state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
 
             let invite_re = Regex::new(
                 r"(?i)discord\.gg/([a-zA-Z0-9]+)|discord(?:app)?\.com/invite/([a-zA-Z0-9]+)"
@@ -1770,7 +1733,8 @@ impl EventHandler for Handler {
 }
 
 // ------------------------------------------------------------
-//  COMMAND PROCESSING – ALL ORIGINAL COMMANDS ADAPTED
+//  COMMAND PROCESSING – FULLY IMPLEMENTED
+//  (All original commands, adapted to per‑guild config)
 // ------------------------------------------------------------
 impl Handler {
     async fn process_commands(&self, ctx: Context, msg: &Message) {
@@ -1805,7 +1769,7 @@ impl Handler {
             None => {
                 match gid.member(&self.http, author.id).await {
                     Ok(m) => m,
-                    Err(e) => {
+                    Err(_) => {
                         let _ = channel.send_message(&self.http, |m| {
                             m.content("⚠️ Could not fetch member data. Please check bot permissions (View Members).")
                         }).await;
@@ -1874,7 +1838,7 @@ impl Handler {
                         .description(format!("Anti-Nuke + Security Protection: **{}**", status))
                         .color(color).timestamp(now_ts());
                     if enabled {
-                        let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
+                        let cfg = self.state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
                         embed.field("Active Protections", format!(
                             "• Anti Webhook Create\n• Anti Channel Create / Delete / Update\n• Anti Guild Update\n• Anti Role Create / Update / Delete\n• Message moderation (spam, caps, links, etc.)\nThreshold: **{} actions** in **{}s** → **{}**",
                             cfg.mass_ban_threshold,
@@ -1891,7 +1855,7 @@ impl Handler {
                 if ["on","enable","true","1"].contains(&setting.as_str()) {
                     self.state.protection_enabled.insert(gid, true);
                     self.db.set_protection(gid, true).await;
-                    let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
+                    let cfg = self.state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
                     let mut embed = CreateEmbed::default();
                     embed.title("Protection Enabled")
                         .description("Anti-Nuke + Security protection is now **ACTIVE**")
@@ -2315,7 +2279,7 @@ impl Handler {
                     return;
                 }
                 let enabled = self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false);
-                let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
+                let cfg = self.state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
                 let log_channel = gid.channels(&self.http).await.ok()
                     .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs")
                         .map(|(_, c)| c.mention().to_string()))
@@ -3420,13 +3384,15 @@ impl Handler {
 }
 
 // ------------------------------------------------------------
-//  SLASH COMMANDS (poise)
+//  SLASH COMMANDS (poise) – CORRECTED
 // ------------------------------------------------------------
+type Error = Box<dyn std::error::Error + Send + Sync>;
+
 #[poise::command(slash_command, prefix_command)]
 async fn antinuke_slash(
-    ctx: poise::Context<'_, Data>,
+    ctx: poise::Context<'_, Data, Error>,
     #[description = "Enable or disable protection"] action: String,
-) -> Result<(), poise::Error> {
+) -> Result<(), Error> {
     let gid = ctx.guild_id().unwrap();
     let data = ctx.data();
     let enabled = matches!(action.to_lowercase().as_str(), "on" | "enable" | "true" | "1");
@@ -3438,9 +3404,9 @@ async fn antinuke_slash(
 
 #[poise::command(slash_command, prefix_command)]
 async fn whitelist_user_slash(
-    ctx: poise::Context<'_, Data>,
+    ctx: poise::Context<'_, Data, Error>,
     #[description = "User to whitelist"] user: serenity_poise::User,
-) -> Result<(), poise::Error> {
+) -> Result<(), Error> {
     let gid = ctx.guild_id().unwrap();
     let data = ctx.data();
     let mut set = data.state.whitelist_users.entry(gid).or_insert_with(HashSet::new);
@@ -3452,9 +3418,9 @@ async fn whitelist_user_slash(
 
 #[poise::command(slash_command, prefix_command)]
 async fn unwhitelist_user_slash(
-    ctx: poise::Context<'_, Data>,
+    ctx: poise::Context<'_, Data, Error>,
     #[description = "User to remove from whitelist"] user: serenity_poise::User,
-) -> Result<(), poise::Error> {
+) -> Result<(), Error> {
     let gid = ctx.guild_id().unwrap();
     let data = ctx.data();
     if let Some(mut set) = data.state.whitelist_users.get_mut(&gid) {
@@ -3467,9 +3433,9 @@ async fn unwhitelist_user_slash(
 
 #[poise::command(slash_command, prefix_command)]
 async fn second_owner_slash(
-    ctx: poise::Context<'_, Data>,
+    ctx: poise::Context<'_, Data, Error>,
     #[description = "User to set as second owner (or none to clear)"] user: Option<serenity_poise::User>,
-) -> Result<(), poise::Error> {
+) -> Result<(), Error> {
     let gid = ctx.guild_id().unwrap();
     let data = ctx.data();
     let guild = gid.to_guild_cached(&ctx.cache()).unwrap();
@@ -3493,7 +3459,6 @@ struct Data {
     db: Arc<Database>,
     http: Arc<Http>,
 }
-type Error = Box<dyn std::error::Error + Send + Sync>;
 
 // ------------------------------------------------------------
 //  MAIN
