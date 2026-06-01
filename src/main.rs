@@ -27,6 +27,7 @@
 #![allow(clippy::new_without_default)]
 #![allow(clippy::wrong_self_convention)]
 #![allow(clippy::items_after_statements)]
+#![allow(clippy::iter_next_slice)]
 #![recursion_limit = "256"]
 
 use serenity::{
