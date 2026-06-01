@@ -21,6 +21,7 @@
 #![allow(clippy::map_clone)]
 #![allow(clippy::let_and_return)]
 #![allow(clippy::needless_borrow)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 #![allow(clippy::match_single_binding)]
 #![allow(clippy::field_reassign_with_default)]
 #![allow(clippy::new_without_default)]
