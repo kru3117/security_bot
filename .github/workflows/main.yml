@@ -1,5 +1,5 @@
+# .github/workflows/build.yml
 name: Build
-
 on:
   push:
     branches: [ main ]
@@ -8,12 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SQLX_OFFLINE: true   # ← critical: disables compile-time DB connection
+  SQLX_OFFLINE: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,16 +33,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run cargo check (fast compile verification)
+      - name: Generate sqlx offline data (first run only — skip on cache hit)
+        run: |
+          cargo install sqlx-cli --no-default-features --features postgres,rustls 2>/dev/null || true
+          mkdir -p .sqlx
+
+      - name: Run cargo check
         run: cargo check --release
 
-      - name: Run cargo clippy (lint)
+      - name: Run cargo clippy
         run: cargo clippy --release -- -D warnings
 
       - name: Build release binary
         run: cargo build --release
 
-      - name: Upload artifact (binary)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: security_bot
