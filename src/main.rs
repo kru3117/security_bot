@@ -37,7 +37,7 @@ use std::{
     time::Duration,
 };
 use poise::serenity_prelude as serenity_poise;
-use poise::serenity_prelude::Mentionable;
+use serenity::model::prelude::Mentionable;
 use rand::Rng;
 
 // ------------------------------------------------------------
@@ -1237,7 +1237,7 @@ impl EventHandler for Handler {
             Some(g) => g,
             None => { self.state.guild_snapshots.insert(new.id, snap_partial_guild(&new)); return; }
         };
-        let gid = new.id;
+        let mut gid = new.id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.guild_snapshots.insert(gid, snap_partial_guild(&new));
             return;
@@ -2702,7 +2702,10 @@ async fn main() -> Result<(), Error> {
     let db = Arc::new(Database::new(&db_url).await);
     db.load_all(&state).await;
     let http = Arc::new(Http::new(&token));
-    let data = Data { state: state.clone(), db: db.clone(), http: http.clone() };
+
+    let state_clone  = state.clone();
+    let db_clone     = db.clone();
+    let http_clone   = http.clone();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -2719,18 +2722,28 @@ async fn main() -> Result<(), Error> {
             },
             ..Default::default()
         })
-        .setup(|ctx, _ready, framework| {
+        .token(&token)
+        .intents(GatewayIntents::all())
+        .setup(move |ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(data)
+                Ok(Data {
+                    state: state_clone,
+                    db: db_clone,
+                    http: http_clone,
+                })
             })
         })
-        .build();
-
-    let mut client = Client::builder(&token, GatewayIntents::all())
-        .framework(framework)
-        .event_handler(Handler { state, db, http })
+        .client_settings(move |builder| {
+            builder.event_handler(Handler {
+                state: state.clone(),
+                db: db.clone(),
+                http: http.clone(),
+            })
+        })
+        .build()
         .await?;
-    client.start().await?;
+
+    framework.start().await?;
     Ok(())
 }
