@@ -1,3 +1,4 @@
+# Cargo.toml
 [package]
 name = "security_bot"
 version = "0.1.0"
@@ -9,29 +10,24 @@ path = "src/main.rs"
 
 [dependencies]
 serenity = { version = "0.11.7", default-features = false, features = [
-    "client",
-    "gateway",
-    "rustls_backend",
-    "model",
-    "cache",
-    "chrono",
+    "client", "gateway", "rustls_backend", "model", "cache", "chrono",
 ] }
-tokio = { version = "1.52.3", features = ["full"] }
-dashmap = "5.5.3"
-chrono = { version = "0.4.44", features = ["serde"] }
-regex = "1.12.3"
-rand = "0.8.6"
-sqlx = { version = "0.7.4", features = ["postgres", "runtime-tokio-rustls", "chrono"] }
+tokio       = { version = "1.52.3", features = ["full"] }
+dashmap     = "5.5.3"
+chrono      = { version = "0.4.44", features = ["serde"] }
+regex       = "1.12.3"
+rand        = "0.8.6"
+sqlx        = { version = "0.7.4", features = ["postgres", "runtime-tokio-rustls", "chrono"] }
 async-trait = "0.1.89"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0"
-futures = "0.3.32"
-tracing = "0.1.44"
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-poise = "0.6.2"
+serde       = { version = "1.0.228", features = ["derive"] }
+serde_json  = "1.0"
+futures     = "0.3.32"
+tracing     = "0.1.44"
+reqwest     = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+poise       = "0.6.2"
 
 [profile.release]
-opt-level = 3
-lto = true
+opt-level     = 3
+lto           = true
 codegen-units = 1
-panic = "abort"
+panic         = "abort"
