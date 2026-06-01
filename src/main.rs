@@ -4,6 +4,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 #![allow(unused_imports)]
+#![allow(clippy::uninlined_format_args)]
 #![recursion_limit = "256"]
 
 use serenity::{
