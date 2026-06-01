@@ -1445,7 +1445,7 @@ impl EventHandler for Handler {
             Some(g) => g,
             None => { self.state.guild_snapshots.insert(new.id, snap_partial_guild(&new)); return; }
         };
-        let gid = new.id; // FIX: was `mut gid` — not needed
+        let mut gid = new.id; // FIX: was `mut gid` — not needed
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.guild_snapshots.insert(gid, snap_partial_guild(&new));
             return;
