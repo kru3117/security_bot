@@ -6,21 +6,45 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true   # ← critical: disables compile-time DB connection
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo build --release
-      - uses: actions/upload-artifact@v4
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run cargo check (fast compile verification)
+        run: cargo check --release
+
+      - name: Run cargo clippy (lint)
+        run: cargo clippy --release -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload artifact (binary)
+        uses: actions/upload-artifact@v4
         with:
           name: security_bot
           path: target/release/security_bot
