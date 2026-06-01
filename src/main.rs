@@ -1,9 +1,9 @@
 // ============================================================
-//  REXZ-STYLE ANTI-NUKE BOT – FULLY FEATURED
-//  Complete version with all commands adapted to per‑guild config
+//  REXZ-STYLE ANTI-NUKE BOT – FULLY FEATURED (FIXED)
 // ============================================================
 #![allow(unused_variables)]
 #![allow(dead_code)]
+#![allow(unused_imports)]
 #![recursion_limit = "256"]
 
 use serenity::{
@@ -27,8 +27,9 @@ use tokio::sync::Semaphore;
 use dashmap::{DashMap, DashSet};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use regex::Regex;
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use reqwest;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
     str::FromStr,
@@ -357,82 +358,118 @@ impl Database {
     }
 
     async fn load_all(&self, state: &BotState) {
-        let rows = sqlx::query!("SELECT guild_id, enabled FROM protection")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let gid = GuildId(row.guild_id as u64);
-            state.protection_enabled.insert(gid, row.enabled != 0);
+        // protection
+        {
+            let rows = sqlx::query("SELECT guild_id, enabled FROM protection")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let gid = GuildId(row.get::<i64, _>("guild_id") as u64);
+                let enabled: i32 = row.get("enabled");
+                state.protection_enabled.insert(gid, enabled != 0);
+            }
         }
-        let rows = sqlx::query!("SELECT guild_id, user_id FROM whitelist_users")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let gid = GuildId(row.guild_id as u64);
-            let uid = UserId(row.user_id as u64);
-            state.whitelist_users.entry(gid).or_insert_with(HashSet::new).insert(uid);
+        // whitelist_users
+        {
+            let rows = sqlx::query("SELECT guild_id, user_id FROM whitelist_users")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let gid = GuildId(row.get::<i64, _>("guild_id") as u64);
+                let uid = UserId(row.get::<i64, _>("user_id") as u64);
+                state.whitelist_users.entry(gid).or_insert_with(HashSet::new).insert(uid);
+            }
         }
-        let rows = sqlx::query!("SELECT guild_id, role_id FROM whitelist_roles")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let gid = GuildId(row.guild_id as u64);
-            let rid = RoleId(row.role_id as u64);
-            state.whitelist_roles.entry(gid).or_insert_with(HashSet::new).insert(rid);
+        // whitelist_roles
+        {
+            let rows = sqlx::query("SELECT guild_id, role_id FROM whitelist_roles")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let gid = GuildId(row.get::<i64, _>("guild_id") as u64);
+                let rid = RoleId(row.get::<i64, _>("role_id") as u64);
+                state.whitelist_roles.entry(gid).or_insert_with(HashSet::new).insert(rid);
+            }
         }
-        let rows = sqlx::query!("SELECT guild_id, user_id FROM link_bypass_users")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let gid = GuildId(row.guild_id as u64);
-            let uid = UserId(row.user_id as u64);
-            state.link_bypass_users.entry(gid).or_insert_with(HashSet::new).insert(uid);
+        // link_bypass_users
+        {
+            let rows = sqlx::query("SELECT guild_id, user_id FROM link_bypass_users")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let gid = GuildId(row.get::<i64, _>("guild_id") as u64);
+                let uid = UserId(row.get::<i64, _>("user_id") as u64);
+                state.link_bypass_users.entry(gid).or_insert_with(HashSet::new).insert(uid);
+            }
         }
-        let rows = sqlx::query!("SELECT guild_id, role_id FROM link_bypass_roles")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let gid = GuildId(row.guild_id as u64);
-            let rid = RoleId(row.role_id as u64);
-            state.link_bypass_roles.entry(gid).or_insert_with(HashSet::new).insert(rid);
+        // link_bypass_roles
+        {
+            let rows = sqlx::query("SELECT guild_id, role_id FROM link_bypass_roles")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let gid = GuildId(row.get::<i64, _>("guild_id") as u64);
+                let rid = RoleId(row.get::<i64, _>("role_id") as u64);
+                state.link_bypass_roles.entry(gid).or_insert_with(HashSet::new).insert(rid);
+            }
         }
-        let now = now_pht();
-        let rows = sqlx::query!("SELECT guild_id, user_id, until_ts FROM muted_users")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let uid = UserId(row.user_id as u64);
-            if let Ok(until) = DateTime::parse_from_rfc3339(&row.until_ts) {
-                if until > now {
-                    state.muted_users.insert(uid, until);
-                } else {
-                    let _ = sqlx::query!("DELETE FROM muted_users WHERE user_id = $1 AND guild_id = $2", row.user_id, row.guild_id)
-                        .execute(&self.pool).await;
+        // muted_users
+        {
+            let now = now_pht();
+            let rows = sqlx::query("SELECT guild_id, user_id, until_ts FROM muted_users")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let gid_raw: i64 = row.get("guild_id");
+                let uid = UserId(row.get::<i64, _>("user_id") as u64);
+                let until_str: String = row.get("until_ts");
+                if let Ok(until) = DateTime::parse_from_rfc3339(&until_str) {
+                    if until > now {
+                        state.muted_users.insert(uid, until);
+                    } else {
+                        let _ = sqlx::query("DELETE FROM muted_users WHERE user_id = $1 AND guild_id = $2")
+                            .bind(row.get::<i64, _>("user_id"))
+                            .bind(gid_raw)
+                            .execute(&self.pool).await;
+                    }
                 }
             }
         }
-        let rows = sqlx::query!("SELECT * FROM guild_config")
-            .fetch_all(&self.pool).await.unwrap_or_default();
-        for row in rows {
-            let config = GuildSecurityConfig {
-                mass_ban_threshold: row.mass_ban_threshold as usize,
-                mass_ban_window_secs: row.mass_ban_window_secs as f64,
-                mass_kick_threshold: row.mass_kick_threshold as usize,
-                mass_kick_window_secs: row.mass_kick_window_secs as f64,
-                mass_channel_create_threshold: row.mass_channel_create_threshold as usize,
-                mass_channel_create_window_secs: row.mass_channel_create_window_secs as f64,
-                mass_role_create_threshold: row.mass_role_create_threshold as usize,
-                mass_role_create_window_secs: row.mass_role_create_window_secs as f64,
-                punishment: Punishment::from_str(&row.punishment).unwrap_or(Punishment::Ban),
-                max_messages_per_minute: row.max_messages_per_minute as usize,
-                max_duplicate_messages: row.max_duplicate_messages as usize,
-                max_emojis: row.max_emojis as usize,
-                auto_ban_threshold: row.auto_ban_threshold as usize,
-                link_whitelist: serde_json::from_str(&row.link_whitelist).unwrap_or_default(),
-                banned_words: serde_json::from_str(&row.banned_words).unwrap_or_default(),
-                second_owner_id: row.second_owner_id.map(|id| UserId(id as u64)),
-            };
-            state.guild_configs.insert(GuildId(row.guild_id as u64), config);
+        // guild_config
+        {
+            let rows = sqlx::query("SELECT guild_id, mass_ban_threshold, mass_ban_window_secs, mass_kick_threshold, mass_kick_window_secs, mass_channel_create_threshold, mass_channel_create_window_secs, mass_role_create_threshold, mass_role_create_window_secs, punishment, max_messages_per_minute, max_duplicate_messages, max_emojis, auto_ban_threshold, link_whitelist, banned_words, second_owner_id FROM guild_config")
+                .fetch_all(&self.pool).await.unwrap_or_default();
+            for row in rows {
+                use sqlx::Row;
+                let config = GuildSecurityConfig {
+                    mass_ban_threshold:           row.get::<i64, _>("mass_ban_threshold") as usize,
+                    mass_ban_window_secs:         row.get::<f64, _>("mass_ban_window_secs"),
+                    mass_kick_threshold:          row.get::<i64, _>("mass_kick_threshold") as usize,
+                    mass_kick_window_secs:        row.get::<f64, _>("mass_kick_window_secs"),
+                    mass_channel_create_threshold: row.get::<i64, _>("mass_channel_create_threshold") as usize,
+                    mass_channel_create_window_secs: row.get::<f64, _>("mass_channel_create_window_secs"),
+                    mass_role_create_threshold:   row.get::<i64, _>("mass_role_create_threshold") as usize,
+                    mass_role_create_window_secs: row.get::<f64, _>("mass_role_create_window_secs"),
+                    punishment: Punishment::from_str(row.get::<&str, _>("punishment")).unwrap_or(Punishment::Ban),
+                    max_messages_per_minute:      row.get::<i64, _>("max_messages_per_minute") as usize,
+                    max_duplicate_messages:       row.get::<i64, _>("max_duplicate_messages") as usize,
+                    max_emojis:                   row.get::<i64, _>("max_emojis") as usize,
+                    auto_ban_threshold:           row.get::<i64, _>("auto_ban_threshold") as usize,
+                    link_whitelist: serde_json::from_str(row.get::<&str, _>("link_whitelist")).unwrap_or_default(),
+                    banned_words:   serde_json::from_str(row.get::<&str, _>("banned_words")).unwrap_or_default(),
+                    second_owner_id: row.get::<Option<i64>, _>("second_owner_id").map(|id| UserId(id as u64)),
+                };
+                state.guild_configs.insert(GuildId(row.get::<i64, _>("guild_id") as u64), config);
+            }
         }
         println!("[DB] All data loaded.");
     }
 
     async fn save_guild_config(&self, gid: GuildId, cfg: &GuildSecurityConfig) {
-        let _ = sqlx::query!(
+        let link_wl = serde_json::to_string(&cfg.link_whitelist).unwrap();
+        let banned_w = serde_json::to_string(&cfg.banned_words).unwrap();
+        let second_owner = cfg.second_owner_id.map(|id| id.0 as i64);
+        let _ = sqlx::query(
             r#"INSERT INTO guild_config (
                 guild_id, mass_ban_threshold, mass_ban_window_secs,
                 mass_kick_threshold, mass_kick_window_secs,
@@ -440,7 +477,7 @@ impl Database {
                 mass_role_create_threshold, mass_role_create_window_secs,
                 punishment, max_messages_per_minute, max_duplicate_messages,
                 max_emojis, auto_ban_threshold, link_whitelist, banned_words, second_owner_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             ON CONFLICT (guild_id) DO UPDATE SET
                 mass_ban_threshold = EXCLUDED.mass_ban_threshold,
                 mass_ban_window_secs = EXCLUDED.mass_ban_window_secs,
@@ -457,77 +494,94 @@ impl Database {
                 auto_ban_threshold = EXCLUDED.auto_ban_threshold,
                 link_whitelist = EXCLUDED.link_whitelist,
                 banned_words = EXCLUDED.banned_words,
-                second_owner_id = EXCLUDED.second_owner_id"#,
-            gid.0 as i64,
-            cfg.mass_ban_threshold as i64,
-            cfg.mass_ban_window_secs,
-            cfg.mass_kick_threshold as i64,
-            cfg.mass_kick_window_secs,
-            cfg.mass_channel_create_threshold as i64,
-            cfg.mass_channel_create_window_secs,
-            cfg.mass_role_create_threshold as i64,
-            cfg.mass_role_create_window_secs,
-            cfg.punishment.as_str(),
-            cfg.max_messages_per_minute as i64,
-            cfg.max_duplicate_messages as i64,
-            cfg.max_emojis as i64,
-            cfg.auto_ban_threshold as i64,
-            serde_json::to_string(&cfg.link_whitelist).unwrap(),
-            serde_json::to_string(&cfg.banned_words).unwrap(),
-            cfg.second_owner_id.map(|id| id.0 as i64)
-        ).execute(&self.pool).await;
+                second_owner_id = EXCLUDED.second_owner_id"#
+        )
+        .bind(gid.0 as i64)
+        .bind(cfg.mass_ban_threshold as i64)
+        .bind(cfg.mass_ban_window_secs)
+        .bind(cfg.mass_kick_threshold as i64)
+        .bind(cfg.mass_kick_window_secs)
+        .bind(cfg.mass_channel_create_threshold as i64)
+        .bind(cfg.mass_channel_create_window_secs)
+        .bind(cfg.mass_role_create_threshold as i64)
+        .bind(cfg.mass_role_create_window_secs)
+        .bind(cfg.punishment.as_str())
+        .bind(cfg.max_messages_per_minute as i64)
+        .bind(cfg.max_duplicate_messages as i64)
+        .bind(cfg.max_emojis as i64)
+        .bind(cfg.auto_ban_threshold as i64)
+        .bind(&link_wl)
+        .bind(&banned_w)
+        .bind(second_owner)
+        .execute(&self.pool).await;
     }
 
     async fn set_protection(&self, gid: GuildId, en: bool) {
-        let _ = sqlx::query!("INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled", gid.0 as i64, en as i32)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled"
+        )
+        .bind(gid.0 as i64)
+        .bind(en as i32)
+        .execute(&self.pool).await;
     }
+
     async fn add_whitelist_user(&self, gid: GuildId, uid: UserId) {
-        let _ = sqlx::query!("INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, uid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        ).bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await;
     }
     async fn remove_whitelist_user(&self, gid: GuildId, uid: UserId) {
-        let _ = sqlx::query!("DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2", gid.0 as i64, uid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2"
+        ).bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await;
     }
     async fn add_whitelist_role(&self, gid: GuildId, rid: RoleId) {
-        let _ = sqlx::query!("INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, rid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        ).bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await;
     }
     async fn remove_whitelist_role(&self, gid: GuildId, rid: RoleId) {
-        let _ = sqlx::query!("DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2", gid.0 as i64, rid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2"
+        ).bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await;
     }
     async fn add_link_bypass_user(&self, gid: GuildId, uid: UserId) {
-        let _ = sqlx::query!("INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, uid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        ).bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await;
     }
     async fn remove_link_bypass_user(&self, gid: GuildId, uid: UserId) {
-        let _ = sqlx::query!("DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2", gid.0 as i64, uid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2"
+        ).bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await;
     }
     async fn add_link_bypass_role(&self, gid: GuildId, rid: RoleId) {
-        let _ = sqlx::query!("INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, rid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        ).bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await;
     }
     async fn remove_link_bypass_role(&self, gid: GuildId, rid: RoleId) {
-        let _ = sqlx::query!("DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2", gid.0 as i64, rid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2"
+        ).bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await;
     }
     async fn add_mute(&self, gid: GuildId, uid: UserId, until: DateTime<chrono::FixedOffset>) {
-        let _ = sqlx::query!("INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts",
-            gid.0 as i64, uid.0 as i64, until.to_rfc3339())
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts"
+        ).bind(gid.0 as i64).bind(uid.0 as i64).bind(until.to_rfc3339()).execute(&self.pool).await;
     }
     async fn remove_mute(&self, gid: GuildId, uid: UserId) {
-        let _ = sqlx::query!("DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2", gid.0 as i64, uid.0 as i64)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2"
+        ).bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await;
     }
     async fn log_action(&self, gid: GuildId, uid: UserId, action: &str, reason: &str) {
         let ts = now_pht().to_rfc3339();
-        let _ = sqlx::query!("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1, $2, $3, $4, $5)",
-            gid.0 as i64, uid.0 as i64, action, reason, ts)
-            .execute(&self.pool).await;
+        let _ = sqlx::query(
+            "INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1,$2,$3,$4,$5)"
+        )
+        .bind(gid.0 as i64).bind(uid.0 as i64).bind(action).bind(reason).bind(ts)
+        .execute(&self.pool).await;
     }
 }
 
@@ -907,13 +961,15 @@ async fn cleanup_mutes(state: Arc<BotState>, db: Arc<Database>) {
         let had_removes = !to_remove.is_empty();
         for uid in &to_remove { state.muted_users.remove(uid); }
         if had_removes {
-            let _ = sqlx::query!("DELETE FROM muted_users WHERE until_ts <= $1", now.to_rfc3339())
+            let now_str = now.to_rfc3339();
+            let _ = sqlx::query("DELETE FROM muted_users WHERE until_ts <= $1")
+                .bind(now_str)
                 .execute(&db.pool).await;
         }
     }
 }
 
-async fn send_embed(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
+async fn send_embed_fn(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
     let mut embed = CreateEmbed::default();
     embed.title(title).description(desc).color(color).timestamp(now_ts());
     let _ = ch.send_message(http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
@@ -1181,7 +1237,7 @@ impl EventHandler for Handler {
             Some(g) => g,
             None => { self.state.guild_snapshots.insert(new.id, snap_partial_guild(&new)); return; }
         };
-        let mut gid = new.id;
+        let gid = new.id;
         if !self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             self.state.guild_snapshots.insert(gid, snap_partial_guild(&new));
             return;
@@ -1386,7 +1442,6 @@ impl EventHandler for Handler {
         }
     }
 
-    // Unban protection
     async fn guild_ban_removal(&self, ctx: Context, guild_id: GuildId, user: User) {
         if !self.state.protection_enabled.get(&guild_id).map(|e| *e).unwrap_or(false) { return; }
         if let Ok(logs) = guild_id.audit_logs(&self.http, Some(23), None, None, Some(5)).await {
@@ -1495,7 +1550,6 @@ impl EventHandler for Handler {
         build_permission_map(&self.state, &self.http, &ctx.cache, gid).await;
     }
 
-    // Message handler – using per-guild config
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.bot { return; }
         let gid = match msg.guild_id { Some(g) => g, None => return };
@@ -1610,29 +1664,23 @@ impl EventHandler for Handler {
                                         }).await;
                                     }
                                     self.db.log_action(gid, msg.author.id, "AD-SPAM-TIMEOUT",
-                                        &format!("Spammed ad in {} channels", channels.len())).await;
+                                        &format!("Spammed ad in multiple channels")).await;
                                     if let Some(log_id) = gid.channels(&self.http).await.ok()
                                         .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
                                     {
-                                        let chans_len = channels.len();
                                         let mut embed = CreateEmbed::default();
                                         embed.title("📢 AD SPAM DETECTED — TIMEOUT ISSUED").color(0xFF4500u32).timestamp(now_ts())
                                             .field("User", format!("{} (`{}`)", msg.author.mention(), msg.author.id), true)
                                             .field("Invite", format!("`discord.gg/{}`", code), true)
-                                            .field("Channels", format!("{} channels spammed", chans_len), true)
                                             .field("Timeout", format!("{} minutes", AD_SPAM_TIMEOUT_MIN), true)
                                             .field("Action", "All ad copies deleted + user timed out", false);
                                         let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                                     }
-                                    let chans_len2 = {
-                                        let spam_map2 = self.state.ad_spam_channels.entry(gid).or_insert_with(DashMap::new);
-                                        spam_map2.get(&msg.author.id).map(|c| c.len()).unwrap_or(0)
-                                    };
                                     let mut embed = CreateEmbed::default();
                                     embed.title("🚫 Server Ad Spam Detected")
                                         .description(format!(
-                                            "{} has been **timed out for {} minutes** for spamming their server ad across **{} channels**.\nAll copies of the ad have been **deleted**.\nYou are only allowed **one ad** per {} hour(s).",
-                                            msg.author.mention(), AD_SPAM_TIMEOUT_MIN, chans_len2, SERVER_AD_EXPIRY_SECS / 3600
+                                            "{} has been **timed out for {} minutes** for spamming their server ad.\nAll copies have been **deleted**.",
+                                            msg.author.mention(), AD_SPAM_TIMEOUT_MIN
                                         ))
                                         .color(0xFF0000u32);
                                     if let Ok(sent) = msg.channel_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await {
@@ -1733,20 +1781,17 @@ impl EventHandler for Handler {
 }
 
 // ------------------------------------------------------------
-//  COMMAND PROCESSING – FULLY IMPLEMENTED
-//  (All original commands, adapted to per‑guild config)
+//  COMMAND PROCESSING
 // ------------------------------------------------------------
 impl Handler {
     async fn process_commands(&self, ctx: Context, msg: &Message) {
         let content = &msg.content;
         let cl2 = content.to_lowercase();
-
         let prefix_len = if cl2.starts_with("null") { 4 } else if cl2.starts_with('x') { 1 } else { return; };
         let after_prefix = content[prefix_len..].trim();
         let args: Vec<&str> = after_prefix.split_whitespace().collect();
         let cmd = args.first().unwrap_or(&"").to_lowercase();
         let rest = &args[1..];
-
         let gid = match msg.guild_id { Some(g) => g, None => return };
         let author = &msg.author;
         let channel = msg.channel_id;
@@ -1760,10 +1805,8 @@ impl Handler {
                 return;
             }
         };
-
         let owner_id = guild.owner_id;
         let is_owner = || author.id == owner_id;
-
         let member = match guild.members.get(&author.id).cloned() {
             Some(m) => m,
             None => {
@@ -1771,7 +1814,7 @@ impl Handler {
                     Ok(m) => m,
                     Err(_) => {
                         let _ = channel.send_message(&self.http, |m| {
-                            m.content("⚠️ Could not fetch member data. Please check bot permissions (View Members).")
+                            m.content("⚠️ Could not fetch member data.")
                         }).await;
                         return;
                     }
@@ -1782,34 +1825,24 @@ impl Handler {
 
         let effective_perms = if let Some(g) = gid.to_guild_cached(&ctx.cache) {
             let mut perms = Permissions::empty();
-            if let Some(everyone) = g.roles.get(&RoleId(gid.0)) {
-                perms |= everyone.permissions;
-            }
+            if let Some(everyone) = g.roles.get(&RoleId(gid.0)) { perms |= everyone.permissions; }
             for role_id in &member.roles {
-                if let Some(role) = g.roles.get(role_id) {
-                    perms |= role.permissions;
-                }
+                if let Some(role) = g.roles.get(role_id) { perms |= role.permissions; }
             }
             perms
-        } else {
-            Permissions::empty()
-        };
+        } else { Permissions::empty() };
 
         let is_admin     = is_owner() || effective_perms.contains(Permissions::ADMINISTRATOR);
-        let manage_msgs  = is_owner() || effective_perms.contains(Permissions::MANAGE_MESSAGES)
-                           || effective_perms.contains(Permissions::ADMINISTRATOR);
-        let ban_members  = is_owner() || effective_perms.contains(Permissions::BAN_MEMBERS)
-                           || effective_perms.contains(Permissions::ADMINISTRATOR);
-        let kick_members = is_owner() || effective_perms.contains(Permissions::KICK_MEMBERS)
-                           || effective_perms.contains(Permissions::ADMINISTRATOR);
-        let manage_roles = is_owner() || effective_perms.contains(Permissions::MANAGE_ROLES)
-                           || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let manage_msgs  = is_owner() || effective_perms.contains(Permissions::MANAGE_MESSAGES)   || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let ban_members  = is_owner() || effective_perms.contains(Permissions::BAN_MEMBERS)        || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let kick_members = is_owner() || effective_perms.contains(Permissions::KICK_MEMBERS)       || effective_perms.contains(Permissions::ADMINISTRATOR);
+        let manage_roles = is_owner() || effective_perms.contains(Permissions::MANAGE_ROLES)       || effective_perms.contains(Permissions::ADMINISTRATOR);
 
-        // Helper to send an embed quickly
-        async fn send_embed(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
-            let mut embed = CreateEmbed::default();
-            embed.title(title).description(desc).color(color).timestamp(now_ts());
-            let _ = ch.send_message(http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+        // local send_embed closure
+        macro_rules! sembed {
+            ($title:expr, $desc:expr, $color:expr) => {
+                send_embed_fn(&self.http, channel, $title, $desc, $color).await
+            };
         }
 
         match cmd.as_str() {
@@ -1823,31 +1856,19 @@ impl Handler {
                 );
                 let _ = channel.send_message(&self.http, |m| m.content(msg_text)).await;
             }
-            "antinuke" => {
+            "antinuke" | "security" => {
                 if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the **server owner**.", 0xFF0000u32).await;
+                    sembed!("🔒 Owner Only", "This command can only be used by the **server owner**.", 0xFF0000u32);
                     return;
                 }
                 if rest.is_empty() {
                     let enabled = self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false);
                     let status = if enabled { "ENABLED" } else { "DISABLED" };
-                    let color = if enabled { 0x00FF00u32 } else { 0xFF0000u32 };
+                    let color  = if enabled { 0x00FF00u32 } else { 0xFF0000u32 };
                     let mut embed = CreateEmbed::default();
                     embed.title("Protection Status")
                         .description(format!("Anti-Nuke + Security Protection: **{}**", status))
                         .color(color).timestamp(now_ts());
-                    if enabled {
-                        let cfg = self.state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
-                        embed.field("Active Protections", format!(
-                            "• Anti Webhook Create\n• Anti Channel Create / Delete / Update\n• Anti Guild Update\n• Anti Role Create / Update / Delete\n• Message moderation (spam, caps, links, etc.)\nThreshold: **{} actions** in **{}s** → **{}**",
-                            cfg.mass_ban_threshold,
-                            cfg.mass_ban_window_secs,
-                            cfg.punishment.as_str().to_uppercase()
-                        ), false);
-                    } else {
-                        embed.field("Note", "Use `xantinuke on` or `xsecurity on` to enable protection.", false);
-                    }
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                     return;
                 }
@@ -1860,12 +1881,11 @@ impl Handler {
                     embed.title("Protection Enabled")
                         .description("Anti-Nuke + Security protection is now **ACTIVE**")
                         .color(0x00FF00u32).timestamp(now_ts())
-                        .field("Now Protected Against",
-                            format!("• Webhook creation abuse\n• Mass channel create / delete / update\n• Server (guild) settings tampering\n• Role create / update / delete spam\n• Message spam, caps, invite links, banned words\nThreshold: **{} actions / {}s** → **{}**",
-                                cfg.mass_ban_threshold,
-                                cfg.mass_ban_window_secs,
-                                cfg.punishment.as_str().to_uppercase()
-                            ), false)
+                        .field("Now Protected Against", format!(
+                            "• Webhook creation abuse\n• Mass channel create / delete / update\n• Server (guild) settings tampering\n• Role create / update / delete spam\n• Message spam, caps, invite links, banned words\nThreshold: **{} actions / {}s** → **{}**",
+                            cfg.mass_ban_threshold, cfg.mass_ban_window_secs,
+                            cfg.punishment.as_str().to_uppercase()
+                        ), false)
                         .field("⚠️ Important", "Whitelist trusted admins with `xwhitelistuser @user` to avoid false triggers.", false)
                         .footer(|f| f.text("Coded by ransxmware.xyz — Protection"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
@@ -1876,368 +1896,184 @@ impl Handler {
                     embed.title("Protection Disabled")
                         .description("Anti-Nuke + Security protection is now **INACTIVE**")
                         .color(0xFF0000u32).timestamp(now_ts())
-                        .field("Note", "Use `xantinuke on` or `xsecurity on` to re-enable protection.", false)
                         .footer(|f| f.text("Coded by ransxmware.xyz — Protection"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ Invalid Setting",
-                        "Usage: `xantinuke on` or `xantinuke off`", 0xFF0000u32).await;
-                }
-            }
-            "security" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    let enabled = self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false);
-                    let status = if enabled { "ENABLED" } else { "DISABLED" };
-                    let color = if enabled { 0x00FF00u32 } else { 0xFF0000u32 };
-                    let mut embed = CreateEmbed::default();
-                    embed.title("Protection Status")
-                        .description(format!("Anti-Nuke + Security: **{}**", status))
-                        .color(color).timestamp(now_ts());
-                    if enabled {
-                        embed.field("Active Protections",
-                            "• Auto-kick unauthorized bots\n• Discord invite blocking\n• Webhook monitoring\n• Channel deletion monitoring\n• Dangerous permission monitoring\n• Message spam / caps / link filtering",
-                            false);
-                    } else {
-                        embed.field("Available Protections",
-                            "Use `xsecurity on` to enable all protection features.", false);
-                    }
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                    return;
-                }
-                let setting = rest[0].to_lowercase();
-                if ["on","enable","true","1"].contains(&setting.as_str()) {
-                    self.state.protection_enabled.insert(gid, true);
-                    self.db.set_protection(gid, true).await;
-                    let mut embed = CreateEmbed::default();
-                    embed.title("Protection Enabled")
-                        .description("Anti-Nuke + Security features are now **ACTIVE**")
-                        .color(0x00FF00u32).timestamp(now_ts())
-                        .field("Now Protected Against",
-                            "• Unauthorized bot additions\n• Discord invite spam\n• Webhook abuse\n• Mass channel operations\n• Dangerous permission escalation\n• Message spam / caps / banned words",
-                            false)
-                        .field("⚠️ Important", "Whitelist trusted admins with `xwhitelistuser @user` to avoid false triggers.", false)
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Security System"));
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                } else if ["off","disable","false","0"].contains(&setting.as_str()) {
-                    self.state.protection_enabled.insert(gid, false);
-                    self.db.set_protection(gid, false).await;
-                    let mut embed = CreateEmbed::default();
-                    embed.title("Protection Disabled")
-                        .description("Anti-Nuke + Security features are now **INACTIVE**")
-                        .color(0xFF0000u32).timestamp(now_ts())
-                        .field("Note", "Use `xsecurity on` or `xantinuke on` to re-enable protection.", false)
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Security System"));
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                } else {
-                    send_embed(&self.http, channel, "❌ Invalid Setting",
-                        "Use `xsecurity on` or `xsecurity off`", 0xFF0000u32).await;
+                    sembed!("❌ Invalid Setting", "Usage: `xantinuke on` or `xantinuke off`", 0xFF0000u32);
                 }
             }
             "whitelistrole" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 if let Some(role_id) = msg.mention_roles.iter().next() {
-                    let role = match gid.to_guild_cached(&ctx.cache)
-                        .and_then(|g| g.roles.get(role_id).cloned())
-                    {
+                    let role = match gid.to_guild_cached(&ctx.cache).and_then(|g| g.roles.get(role_id).cloned()) {
                         Some(r) => r,
-                        None => { send_embed(&self.http, channel, "❌ Role Not Found",
-                            "Could not find that role.", 0xFF0000u32).await; return; }
+                        None => { sembed!("❌ Role Not Found", "Could not find that role.", 0xFF0000u32); return; }
                     };
                     let mut set = self.state.whitelist_roles.entry(gid).or_insert_with(HashSet::new);
                     if set.contains(&role.id) {
-                        send_embed(&self.http, channel, "❌ Already Whitelisted",
-                            &format!("{} is already whitelisted.", role.mention()), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Already Whitelisted", "Role already whitelisted.", 0xFF0000u32); return;
                     }
                     set.insert(role.id);
                     self.db.add_whitelist_role(gid, role.id).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("✅ Role Whitelisted")
-                        .description(format!("{} has been added to the anti-nuke whitelist.", role.mention()))
+                        .description(format!("{} added to whitelist.", role.mention()))
                         .color(0x00FF00u32).timestamp(now_ts())
-                        .field("Role", role.mention(), true)
-                        .field("Added by", author.mention(), true)
-                        .field("Benefit", "Members with this role bypass anti-nuke & security checks.", false)
                         .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ Missing Role",
-                        "Usage: `xwhitelistrole @role`", 0xFF0000u32).await;
+                    sembed!("❌ Missing Role", "Usage: `xwhitelistrole @role`", 0xFF0000u32);
                 }
             }
             "unwhitelistrole" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 if let Some(role_id) = msg.mention_roles.iter().next() {
-                    let role = match gid.to_guild_cached(&ctx.cache)
-                        .and_then(|g| g.roles.get(role_id).cloned())
-                    {
+                    let role = match gid.to_guild_cached(&ctx.cache).and_then(|g| g.roles.get(role_id).cloned()) {
                         Some(r) => r,
-                        None => { send_embed(&self.http, channel, "❌ Role Not Found",
-                            "Could not find that role.", 0xFF0000u32).await; return; }
+                        None => { sembed!("❌ Role Not Found", "Could not find that role.", 0xFF0000u32); return; }
                     };
                     let mut set = self.state.whitelist_roles.entry(gid).or_insert_with(HashSet::new);
                     if !set.contains(&role.id) {
-                        send_embed(&self.http, channel, "❌ Role Not Whitelisted",
-                            &format!("{} is not whitelisted.", role.mention()), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Not Whitelisted", "Role not in whitelist.", 0xFF0000u32); return;
                     }
                     set.remove(&role.id);
                     self.db.remove_whitelist_role(gid, role.id).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("✅ Role Removed from Whitelist")
-                        .description(format!("{} has been removed from the whitelist.", role.mention()))
+                        .description(format!("{} removed.", role.mention()))
                         .color(0x00FF00u32).timestamp(now_ts())
-                        .field("Role", role.mention(), true)
-                        .field("Removed by", author.mention(), true)
                         .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ Missing Role",
-                        "Usage: `xunwhitelistrole @role`", 0xFF0000u32).await;
+                    sembed!("❌ Missing Role", "Usage: `xunwhitelistrole @role`", 0xFF0000u32);
                 }
             }
             "whitelistuser" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 if let Some(user_mention) = msg.mentions.iter().next() {
                     let uid = user_mention.id;
                     let mut set = self.state.whitelist_users.entry(gid).or_insert_with(HashSet::new);
                     if set.contains(&uid) {
-                        send_embed(&self.http, channel, "❌ Already Whitelisted",
-                            &format!("{} is already whitelisted.", user_mention.mention()), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Already Whitelisted", "User already whitelisted.", 0xFF0000u32); return;
                     }
                     set.insert(uid);
                     self.db.add_whitelist_user(gid, uid).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("✅ User Whitelisted")
-                        .description(format!("{} has been added to the anti-nuke whitelist.", user_mention.mention()))
+                        .description(format!("{} added to whitelist.", user_mention.mention()))
                         .color(0x00FF00u32).timestamp(now_ts())
-                        .field("User", user_mention.mention(), true)
-                        .field("Added by", author.mention(), true)
                         .thumbnail(user_mention.avatar_url().unwrap_or_else(|| user_mention.default_avatar_url()))
                         .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xwhitelistuser @user`", 0xFF0000u32).await;
+                    sembed!("❌ Missing User", "Usage: `xwhitelistuser @user`", 0xFF0000u32);
                 }
             }
             "unwhitelistuser" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 if let Some(user_mention) = msg.mentions.iter().next() {
                     let uid = user_mention.id;
                     let mut set = self.state.whitelist_users.entry(gid).or_insert_with(HashSet::new);
                     if !set.contains(&uid) {
-                        send_embed(&self.http, channel, "❌ User Not Whitelisted",
-                            &format!("{} is not whitelisted.", user_mention.mention()), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Not Whitelisted", "User not in whitelist.", 0xFF0000u32); return;
                     }
                     set.remove(&uid);
                     self.db.remove_whitelist_user(gid, uid).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("✅ User Removed from Whitelist")
-                        .description(format!("{} has been removed from the whitelist.", user_mention.mention()))
+                        .description(format!("{} removed.", user_mention.mention()))
                         .color(0x00FF00u32).timestamp(now_ts())
-                        .field("User", user_mention.mention(), true)
-                        .field("Removed by", author.mention(), true)
-                        .thumbnail(user_mention.avatar_url().unwrap_or_else(|| user_mention.default_avatar_url()))
                         .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xunwhitelistuser @user`", 0xFF0000u32).await;
+                    sembed!("❌ Missing User", "Usage: `xunwhitelistuser @user`", 0xFF0000u32);
                 }
             }
             "whitelistlist" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 let guild = match gid.to_guild_cached(&ctx.cache) {
                     Some(g) => g,
-                    None => { send_embed(&self.http, channel, "❌ Error",
-                        "Guild not cached yet.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Error", "Guild not cached.", 0xFF0000u32); return; }
                 };
                 let wl_roles = self.state.whitelist_roles.get(&gid).map(|s| {
                     s.iter().map(|rid| guild.roles.get(rid)
                         .map(|r| r.mention().to_string())
                         .unwrap_or_else(|| format!("<deleted role {}>", rid.0)))
                         .collect::<Vec<_>>().join("\n")
-                }).unwrap_or_else(|| "None".to_string());
+                }).filter(|s| !s.is_empty()).unwrap_or_else(|| "None".to_string());
                 let wl_users = self.state.whitelist_users.get(&gid).map(|s| {
                     s.iter().map(|uid| guild.members.get(uid)
                         .map(|m| m.mention().to_string())
                         .unwrap_or_else(|| format!("<user {}>", uid.0)))
                         .collect::<Vec<_>>().join("\n")
-                }).unwrap_or_else(|| "None".to_string());
-                let bypass_users = self.state.link_bypass_users.get(&gid).map(|s| {
-                    s.iter().map(|uid| guild.members.get(uid)
-                        .map(|m| m.mention().to_string())
-                        .unwrap_or_else(|| format!("<user {}>", uid.0)))
-                        .collect::<Vec<_>>().join("\n")
-                }).unwrap_or_else(|| "None".to_string());
-                let bypass_roles = self.state.link_bypass_roles.get(&gid).map(|s| {
-                    s.iter().map(|rid| guild.roles.get(rid)
-                        .map(|r| r.mention().to_string())
-                        .unwrap_or_else(|| format!("<deleted role {}>", rid.0)))
-                        .collect::<Vec<_>>().join("\n")
-                }).unwrap_or_else(|| "None".to_string());
+                }).filter(|s| !s.is_empty()).unwrap_or_else(|| "None".to_string());
                 let mut embed = CreateEmbed::default();
-                embed.title("🛡️ Whitelist & Bypass List")
-                    .description(format!("Configuration for **{}**", guild.name))
+                embed.title("🛡️ Whitelist List")
                     .color(EMBED_COLOR).timestamp(now_ts())
-                    .field("🔒 Whitelisted Roles (Anti-Nuke)", wl_roles, false)
-                    .field("👤 Whitelisted Users (Anti-Nuke)", wl_users, false)
-                    .field("🔗 Link Bypass Users", bypass_users, false)
-                    .field("🔗 Link Bypass Roles", bypass_roles, false)
+                    .field("🔒 Whitelisted Roles", wl_roles, false)
+                    .field("👤 Whitelisted Users", wl_users, false)
                     .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "bypasslink" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 if let Some(user_mention) = msg.mentions.iter().next() {
                     let uid = user_mention.id;
                     let mut set = self.state.link_bypass_users.entry(gid).or_insert_with(HashSet::new);
                     if set.contains(&uid) {
-                        send_embed(&self.http, channel, "❌ Already Bypassed",
-                            &format!("{} already has a link bypass.", user_mention.mention()), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Already Bypassed", "User already has link bypass.", 0xFF0000u32); return;
                     }
                     set.insert(uid);
                     self.db.add_link_bypass_user(gid, uid).await;
-                    let mut embed = CreateEmbed::default();
-                    embed.title("✅ Link Bypass Granted")
-                        .description(format!("{} can now post **any link** without being filtered.", user_mention.mention()))
-                        .color(0x00FF00u32).timestamp(now_ts())
-                        .field("User", user_mention.mention(), true)
-                        .field("Granted by", author.mention(), true)
-                        .field("ℹ️ Note", "Use `xremovebypasslink @user` to revoke this bypass.", false)
-                        .thumbnail(user_mention.avatar_url().unwrap_or_else(|| user_mention.default_avatar_url()))
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Link Bypass"));
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                    sembed!("✅ Link Bypass Granted", "User can now post any link.", 0x00FF00u32);
                 } else if let Some(rid) = msg.mention_roles.iter().next() {
                     let rid = *rid;
-                    let role_name = gid.to_guild_cached(&ctx.cache)
-                        .and_then(|g| g.roles.get(&rid).map(|r| r.name.clone()))
-                        .unwrap_or_else(|| rid.to_string());
                     let mut set = self.state.link_bypass_roles.entry(gid).or_insert_with(HashSet::new);
                     if set.contains(&rid) {
-                        send_embed(&self.http, channel, "❌ Already Bypassed",
-                            &format!("`{}` already has a link bypass.", role_name), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Already Bypassed", "Role already has link bypass.", 0xFF0000u32); return;
                     }
                     set.insert(rid);
                     self.db.add_link_bypass_role(gid, rid).await;
-                    let mut embed = CreateEmbed::default();
-                    embed.title("✅ Link Bypass Granted (Role)")
-                        .description(format!("All members with <@&{}> can now post **any link** without being filtered.", rid.0))
-                        .color(0x00FF00u32).timestamp(now_ts())
-                        .field("Role", format!("<@&{}>", rid.0), true)
-                        .field("Granted by", author.mention(), true)
-                        .field("ℹ️ Note", "Use `xremovebypasslink @role` to revoke this bypass.", false)
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Link Bypass"));
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                    sembed!("✅ Role Link Bypass Granted", "Role members can now post any link.", 0x00FF00u32);
                 } else {
-                    send_embed(&self.http, channel, "❌ Invalid Target",
-                        "Please mention a **user** or a **role**.\nUsage: `xbypasslink @user` or `xbypasslink @role`",
-                        0xFF0000u32).await;
+                    sembed!("❌ Invalid Target", "Mention a user or role.", 0xFF0000u32);
                 }
             }
             "removebypasslink" => {
-                if !is_owner() {
-                    send_embed(&self.http, channel, "🔒 Owner Only",
-                        "This command can only be used by the server owner.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_owner() { sembed!("🔒 Owner Only", "Server owner only.", 0xFF0000u32); return; }
                 if let Some(user_mention) = msg.mentions.iter().next() {
                     let uid = user_mention.id;
                     let mut set = self.state.link_bypass_users.entry(gid).or_insert_with(HashSet::new);
                     if !set.contains(&uid) {
-                        send_embed(&self.http, channel, "❌ Not Bypassed",
-                            &format!("{} does not have a link bypass.", user_mention.mention()), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Not Bypassed", "User does not have a link bypass.", 0xFF0000u32); return;
                     }
                     set.remove(&uid);
                     self.db.remove_link_bypass_user(gid, uid).await;
-                    let mut embed = CreateEmbed::default();
-                    embed.title("✅ Link Bypass Revoked")
-                        .description(format!("{}'s link bypass has been removed.", user_mention.mention()))
-                        .color(0xFF4500u32).timestamp(now_ts())
-                        .field("User", user_mention.mention(), true)
-                        .field("Removed by", author.mention(), true)
-                        .thumbnail(user_mention.avatar_url().unwrap_or_else(|| user_mention.default_avatar_url()))
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Link Bypass"));
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                    sembed!("✅ Link Bypass Revoked", "User link bypass removed.", 0xFF4500u32);
                 } else if let Some(rid) = msg.mention_roles.iter().next() {
                     let rid = *rid;
-                    let role_name = gid.to_guild_cached(&ctx.cache)
-                        .and_then(|g| g.roles.get(&rid).map(|r| r.name.clone()))
-                        .unwrap_or_else(|| rid.to_string());
                     let mut set = self.state.link_bypass_roles.entry(gid).or_insert_with(HashSet::new);
                     if !set.contains(&rid) {
-                        send_embed(&self.http, channel, "❌ Not Bypassed",
-                            &format!("`{}` does not have a link bypass.", role_name), 0xFF0000u32).await;
-                        return;
+                        sembed!("❌ Not Bypassed", "Role does not have a link bypass.", 0xFF0000u32); return;
                     }
                     set.remove(&rid);
                     self.db.remove_link_bypass_role(gid, rid).await;
-                    let mut embed = CreateEmbed::default();
-                    embed.title("✅ Role Link Bypass Revoked")
-                        .description(format!("Link bypass for <@&{}> has been removed.", rid.0))
-                        .color(0xFF4500u32).timestamp(now_ts())
-                        .field("Role", format!("<@&{}>", rid.0), true)
-                        .field("Removed by", author.mention(), true)
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Link Bypass"));
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                    sembed!("✅ Role Link Bypass Revoked", "Role link bypass removed.", 0xFF4500u32);
                 } else {
-                    send_embed(&self.http, channel, "❌ Invalid Target",
-                        "Please mention a **user** or a **role**.\nUsage: `xremovebypasslink @user` or `xremovebypasslink @role`",
-                        0xFF0000u32).await;
+                    sembed!("❌ Invalid Target", "Mention a user or role.", 0xFF0000u32);
                 }
             }
             "setup" => {
-                if !is_admin {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Administrator permission.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_admin { sembed!("❌ Missing Permissions", "Need Administrator.", 0xFF0000u32); return; }
                 if let Some(existing) = gid.channels(&self.http).await.ok()
                     .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(_, c)| c))
                 {
-                    send_embed(&self.http, channel, "Channel Already Exists",
-                        &format!("Security logs channel already exists: {}", existing.mention()), 0xFFA500u32).await;
+                    sembed!("Channel Already Exists", &format!("Already exists: {}", existing.mention()), 0xFFA500u32);
                     return;
                 }
                 let bot_id = match self.http.get_current_user().await {
                     Ok(u) => u.id,
-                    Err(_) => { send_embed(&self.http, channel, "❌ Error",
-                        "Could not fetch bot user.", 0xFF0000u32).await; return; }
+                    Err(_) => { sembed!("❌ Error", "Could not fetch bot user.", 0xFF0000u32); return; }
                 };
                 let overwrites = vec![
                     PermissionOverwrite {
@@ -2250,34 +2086,18 @@ impl Handler {
                         kind: PermissionOverwriteType::Member(bot_id),
                     },
                 ];
-                let overwrites_clone = overwrites.clone();
+                let ow2 = overwrites.clone();
                 if let Ok(new_channel) = gid.create_channel(&self.http, |c| {
-                    c.name("security-logs")
-                     .permissions(overwrites_clone)
-                     .topic("Coded by ransxmware.xyz — Automated security logs and violations")
+                    c.name("security-logs").permissions(ow2)
+                     .topic("Coded by ransxmware.xyz — Automated security logs")
                 }).await {
-                    let mut welcome = CreateEmbed::default();
-                    welcome.title("Coded by ransxmware.xyz — Logs Channel")
-                        .description("This channel will receive all security notifications, anti-nuke alerts, and violation reports.")
-                        .color(EMBED_COLOR).timestamp(now_ts())
-                        .field("What gets logged here:", "• Anti-nuke triggers\n• Security violations\n• Auto-kicks and auto-bans\n• New account alerts\n• Webhook activities\n• Permission changes", false)
-                        .field("Commands to get started:", "`xantinuke on` — Enable anti-nuke\n`xsecurity on` — Enable message security\n`xconfig` — View configuration\n`xhelp` — View all commands", false)
-                        .footer(|f| f.text("Coded by ransxmware.xyz")
-                            .icon_url(ctx.cache.current_user().avatar_url().unwrap_or_default()));
-                    let _ = new_channel.send_message(&self.http, |m| m.embed(|e| { *e = welcome.clone(); e })).await;
-                    send_embed(&self.http, channel, "Setup Complete",
-                        &format!("Security logs channel created: {}", new_channel.mention()), 0x00FF00u32).await;
+                    sembed!("Setup Complete", &format!("Security logs channel created: {}", new_channel.mention()), 0x00FF00u32);
                 } else {
-                    send_embed(&self.http, channel, "❌ Setup Failed",
-                        "An error occurred during setup.", 0xFF0000u32).await;
+                    sembed!("❌ Setup Failed", "An error occurred during setup.", 0xFF0000u32);
                 }
             }
             "config" => {
-                if !is_admin {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Administrator permission.", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_admin { sembed!("❌ Missing Permissions", "Need Administrator.", 0xFF0000u32); return; }
                 let enabled = self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false);
                 let cfg = self.state.guild_configs.get(&gid).map(|c| c.clone()).unwrap_or_default();
                 let log_channel = gid.channels(&self.http).await.ok()
@@ -2285,257 +2105,114 @@ impl Handler {
                         .map(|(_, c)| c.mention().to_string()))
                     .unwrap_or_else(|| "❌ Not Set".to_string());
                 let mut embed = CreateEmbed::default();
-                embed.title("Security Configuration")
-                    .description("Current security settings and limits")
-                    .color(EMBED_COLOR).timestamp(now_ts())
-                    .field("Protection (Anti-Nuke + Security)",
-                        if enabled { "✅ ENABLED" } else { "🔴 DISABLED" }, false)
+                embed.title("Security Configuration").color(EMBED_COLOR).timestamp(now_ts())
+                    .field("Protection", if enabled { "✅ ENABLED" } else { "🔴 DISABLED" }, false)
                     .field("Logs Channel", log_channel, true)
                     .field("Anti-Nuke Settings", format!(
-                        "**Threshold:**  {} actions\n**Window:**     {}s\n**Punishment:** {}",
-                        cfg.mass_ban_threshold,
-                        cfg.mass_ban_window_secs,
+                        "Threshold: {} actions\nWindow: {}s\nPunishment: {}",
+                        cfg.mass_ban_threshold, cfg.mass_ban_window_secs,
                         cfg.punishment.as_str().to_uppercase()
                     ), false)
                     .field("Security Limits", format!(
-                        "**Messages/Minute:**    {}\n**Duplicate Messages:** {}\n**Max Emojis:**         {}\n**Auto-ban Threshold:** {} violations",
-                        cfg.max_messages_per_minute,
-                        cfg.max_duplicate_messages,
-                        cfg.max_emojis,
-                        cfg.auto_ban_threshold
+                        "Messages/min: {}\nDuplicate limit: {}\nMax emojis: {}\nAuto-ban at: {} violations",
+                        cfg.max_messages_per_minute, cfg.max_duplicate_messages,
+                        cfg.max_emojis, cfg.auto_ban_threshold
                     ), false)
-                    .field("Whitelisted Roles",
-                        format!("{} roles", self.state.whitelist_roles.get(&gid).map(|s| s.len()).unwrap_or(0)), true)
-                    .field("Whitelisted Users",
-                        format!("{} users", self.state.whitelist_users.get(&gid).map(|s| s.len()).unwrap_or(0)), true)
                     .field("Allowed Domains", cfg.link_whitelist.join(", "), false)
-                    .field("Banned Words",
-                        format!("{} words filtered", cfg.banned_words.len()), true)
+                    .field("Banned Words", format!("{} words filtered", cfg.banned_words.len()), true)
                     .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "stats" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
                 let total_violations: usize = self.state.user_violations.iter().map(|e| *e.value()).sum();
                 let total_muted = self.state.muted_users.len();
                 let total_warnings: usize = self.state.user_warnings.iter().map(|e| e.value().len()).sum();
-                let mut top = self.state.user_violations.iter()
-                    .filter(|e| ctx.cache.guild(gid).map(|g| g.members.contains_key(e.key())).unwrap_or(false))
-                    .collect::<Vec<_>>();
-                top.sort_by(|a, b| b.value().cmp(a.value()));
-                let top5 = top.iter().take(5).map(|e| {
-                    format!("{}: {}", ctx.cache.guild(gid)
-                        .and_then(|g| g.members.get(e.key()).map(|m| m.mention().to_string()))
-                        .unwrap_or_else(|| format!("<@{}>", e.key().0)),
-                        e.value())
-                }).collect::<Vec<_>>().join("\n");
                 let mut embed = CreateEmbed::default();
-                embed.title("Security Statistics")
-                    .description(format!("Security data for **{}**",
-                        ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_default()))
-                    .color(EMBED_COLOR).timestamp(now_ts())
+                embed.title("Security Statistics").color(EMBED_COLOR).timestamp(now_ts())
                     .field("Total Violations", total_violations.to_string(), true)
                     .field("Currently Muted", total_muted.to_string(), true)
                     .field("Total Warnings", total_warnings.to_string(), true)
-                    .field("Protection Status",
-                        if self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false)
-                        { "✅ Active" } else { "🔴 Inactive" }, true)
-                    .field("Server Members",
-                        ctx.cache.guild(gid).map(|g| g.member_count).unwrap_or(0).to_string(), true);
-                if !top5.is_empty() { embed.field("🚨 Top Violators", top5, false); }
+                    .field("Protection", if self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) { "✅ Active" } else { "🔴 Inactive" }, true)
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "purge" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing Amount",
-                        "Usage: `xpurge <amount>`", 0xFF0000u32).await;
-                    return;
-                }
-                let amount = match rest[0].parse::<usize>() {
-                    Ok(a) => a,
-                    Err(_) => { send_embed(&self.http, channel, "❌ Invalid Amount",
-                        "Please specify a positive number.", 0xFF0000u32).await; return; }
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
+                let amount = match rest.first().and_then(|s| s.parse::<usize>().ok()) {
+                    Some(a) if a > 0 && a <= 100 => a,
+                    _ => { sembed!("❌ Invalid Amount", "Usage: `xpurge <1-100>`", 0xFF0000u32); return; }
                 };
-                if amount == 0 || amount > 100 {
-                    send_embed(&self.http, channel, "❌ Invalid Amount",
-                        "Amount must be between 1 and 100.", 0xFF0000u32).await;
-                    return;
-                }
                 let _ = msg.delete(&self.http).await;
-                let deleted = channel.messages(&self.http, |m| m.limit(amount as u64)).await.unwrap_or_default();
-                if !deleted.is_empty() {
-                    let _ = channel.delete_messages(&self.http, deleted.iter().collect::<Vec<_>>()).await;
+                let messages = channel.messages(&self.http, |m| m.limit(amount as u64)).await.unwrap_or_default();
+                if !messages.is_empty() {
+                    let _ = channel.delete_messages(&self.http, messages.iter().collect::<Vec<_>>()).await;
                 }
+                let count = messages.len();
                 let mut embed = CreateEmbed::default();
                 embed.title("Messages Purged")
-                    .description(format!("Successfully deleted **{}** messages from {}", deleted.len(), channel.mention()))
+                    .description(format!("Deleted **{}** messages from {}", count, channel.mention()))
                     .color(0x00FF00u32).timestamp(now_ts())
-                    .field("Requested by", author.mention(), true)
-                    .field("Channel", channel.mention(), true)
                     .footer(|f| f.text("Coded by ransxmware.xyz"));
-                let sent = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await.ok();
-                if let Some(s) = sent {
+                if let Ok(s) = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     let _ = s.delete(&self.http).await;
                 }
             }
             "warn" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xwarn @user <reason>`", 0xFF0000u32).await;
-                    return;
-                }
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xwarn @user <reason>`", 0xFF0000u32); return; }
                 };
                 let reason = if rest.len() > 1 { rest[1..].join(" ") } else { "No reason provided".to_string() };
-                if target.id == author.id {
-                    send_embed(&self.http, channel, "❌ Cannot Warn Yourself",
-                        "You cannot warn yourself!", 0xFF0000u32).await;
-                    return;
-                }
-                if let Ok(tmember) = gid.member(&self.http, target.id).await {
-                    if let Some(g) = gid.to_guild_cached(&ctx.cache) {
-                        let mut tperms = Permissions::empty();
-                        if let Some(ev) = g.roles.get(&RoleId(gid.0)) { tperms |= ev.permissions; }
-                        for rid in &tmember.roles {
-                            if let Some(r) = g.roles.get(rid) { tperms |= r.permissions; }
-                        }
-                        if tperms.contains(Permissions::ADMINISTRATOR) {
-                            send_embed(&self.http, channel, "❌ Cannot Warn Administrator",
-                                "Cannot warn administrators.", 0xFF0000u32).await;
-                            return;
-                        }
-                    }
-                }
-                let warning = WarningData {
-                    reason: reason.clone(), moderator: author.id,
-                    timestamp: now_pht(), guild_id: gid,
-                };
+                if target.id == author.id { sembed!("❌ Cannot Warn Yourself", "You cannot warn yourself!", 0xFF0000u32); return; }
+                let warning = WarningData { reason: reason.clone(), moderator: author.id, timestamp: now_pht(), guild_id: gid };
                 let mut warnings = self.state.user_warnings.entry(target.id).or_insert_with(Vec::new);
                 warnings.push(warning);
                 self.db.log_action(gid, target.id, "WARN", &reason).await;
                 let count = warnings.iter().filter(|w| w.guild_id == gid).count();
-                let target_avatar = target.avatar_url().unwrap_or_else(|| target.default_avatar_url());
-                let guild_name = ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_default();
                 let mut embed = CreateEmbed::default();
                 embed.title("⚠️ USER WARNING").color(0xFFA500u32).timestamp(now_ts())
                     .field("User", target.mention(), true)
                     .field("Moderator", author.mention(), true)
-                    .field("Warning Count", count.to_string(), true)
+                    .field("Count", count.to_string(), true)
                     .field("Reason", reason.clone(), false)
-                    .thumbnail(target_avatar)
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Warning System"));
+                    .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                let author_tag = author.tag();
-                let mut dm = CreateEmbed::default();
-                dm.title("⚠️ You have been warned")
-                    .description(format!("You have been warned in **{}**", guild_name))
-                    .color(0xFFA500u32).timestamp(now_ts())
-                    .field("Reason", reason, false)
-                    .field("Moderator", author_tag, true)
-                    .field("Total Warnings", count.to_string(), true);
-                let _ = target.direct_message(&self.http, |m| m.embed(|e| { *e = dm.clone(); e })).await;
             }
             "mute" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xmute @user [duration] [reason]`", 0xFF0000u32).await;
-                    return;
-                }
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xmute @user [minutes] [reason]`", 0xFF0000u32); return; }
                 };
-                let duration = if rest.len() > 1 { rest[1].parse::<i64>().unwrap_or(10) } else { 10 };
+                if target.id == author.id { sembed!("❌ Cannot Mute Yourself", "You cannot mute yourself!", 0xFF0000u32); return; }
+                let duration = rest.get(1).and_then(|s| s.parse::<i64>().ok()).unwrap_or(10);
                 let reason = if rest.len() > 2 { rest[2..].join(" ") } else { "No reason provided".to_string() };
-                if target.id == author.id {
-                    send_embed(&self.http, channel, "❌ Cannot Mute Yourself",
-                        "You cannot mute yourself!", 0xFF0000u32).await;
-                    return;
-                }
-                if let Ok(tmember) = gid.member(&self.http, target.id).await {
-                    if let Some(g) = gid.to_guild_cached(&ctx.cache) {
-                        let mut tperms = Permissions::empty();
-                        if let Some(ev) = g.roles.get(&RoleId(gid.0)) { tperms |= ev.permissions; }
-                        for rid in &tmember.roles {
-                            if let Some(r) = g.roles.get(rid) { tperms |= r.permissions; }
-                        }
-                        if tperms.contains(Permissions::ADMINISTRATOR) {
-                            send_embed(&self.http, channel, "❌ Cannot Mute Administrator",
-                                "Cannot mute administrators.", 0xFF0000u32).await;
-                            return;
-                        }
-                    }
-                }
                 let until = now_pht() + ChronoDuration::minutes(duration);
                 self.state.muted_users.insert(target.id, until);
                 self.db.add_mute(gid, target.id, until).await;
                 self.db.log_action(gid, target.id, "MUTE", &format!("{}min — {}", duration, reason)).await;
-                let target_avatar = target.avatar_url().unwrap_or_else(|| target.default_avatar_url());
-                let guild_name = ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_default();
-                let until_str = until.to_rfc3339();
                 let mut embed = CreateEmbed::default();
                 embed.title("USER MUTED").color(0xFF4500u32).timestamp(now_ts())
                     .field("User", target.mention(), true)
-                    .field("Moderator", author.mention(), true)
-                    .field("Duration", format!("{} minutes", duration), true)
-                    .field("Reason", reason.clone(), false)
-                    .field("Expires", until_str.clone(), true)
-                    .thumbnail(target_avatar)
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Mute System"));
-                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                let mut dm = CreateEmbed::default();
-                dm.title("You have been muted")
-                    .description(format!("You have been muted in **{}**", guild_name))
-                    .color(0xFF4500u32).timestamp(now_ts())
                     .field("Duration", format!("{} minutes", duration), true)
                     .field("Reason", reason, false)
-                    .field("Expires", until_str, true);
-                let _ = target.direct_message(&self.http, |m| m.embed(|e| { *e = dm.clone(); e })).await;
+                    .field("Expires", until.to_rfc3339(), false)
+                    .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
+                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "unmute" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xunmute @user`", 0xFF0000u32).await;
-                    return;
-                }
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xunmute @user`", 0xFF0000u32); return; }
                 };
                 if !self.state.muted_users.contains_key(&target.id) {
-                    send_embed(&self.http, channel, "❌ User Not Muted",
-                        &format!("{} is not currently muted.", target.mention()), 0xFF0000u32).await;
-                    return;
+                    sembed!("❌ Not Muted", "User is not muted.", 0xFF0000u32); return;
                 }
                 self.state.muted_users.remove(&target.id);
                 self.db.remove_mute(gid, target.id).await;
@@ -2543,310 +2220,150 @@ impl Handler {
                 embed.title("USER UNMUTED")
                     .description(format!("{} has been unmuted.", target.mention()))
                     .color(0x00FF00u32).timestamp(now_ts())
-                    .field("User", target.mention(), true)
-                    .field("Moderator", author.mention(), true)
-                    .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Mute System"));
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "role" => {
-                if !manage_roles {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Roles permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.len() < 2 {
-                    send_embed(&self.http, channel, "❌ Missing Arguments",
-                        "Usage: `xrole @user @role`", 0xFF0000u32).await;
-                    return;
-                }
+                if !manage_roles { sembed!("❌ Missing Permissions", "Need Manage Roles.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xrole @user @role`", 0xFF0000u32); return; }
                 };
                 let role_id = match msg.mention_roles.iter().next() {
                     Some(r) => *r,
-                    None => { send_embed(&self.http, channel, "❌ Missing Role",
-                        "Please mention a role.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing Role", "Please mention a role.", 0xFF0000u32); return; }
                 };
-                let role = match gid.to_guild_cached(&ctx.cache)
-                    .and_then(|g| g.roles.get(&role_id).cloned())
-                {
+                let role = match gid.to_guild_cached(&ctx.cache).and_then(|g| g.roles.get(&role_id).cloned()) {
                     Some(r) => r,
-                    None => { send_embed(&self.http, channel, "❌ Role Not Found",
-                        "Could not find that role.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Role Not Found", "Could not find that role.", 0xFF0000u32); return; }
                 };
                 if let Ok(mut member) = gid.member(&self.http, target.id).await {
                     if member.roles.contains(&role.id) {
-                        send_embed(&self.http, channel, "Role Already Assigned",
-                            &format!("{} already has {}", target.mention(), role.mention()), 0xFFA500u32).await;
-                        return;
-                    }
-                    if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
-                        let bot_id = ctx.cache.current_user().id;
-                        let bot_highest = guild.members.get(&bot_id)
-                            .and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r))
-                                .max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
-                        let author_highest = guild.members.get(&author.id)
-                            .and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r))
-                                .max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
-                        if role.position >= bot_highest {
-                            send_embed(&self.http, channel, "❌ Cannot Manage Role",
-                                "I don't have permission to manage this role (role hierarchy).", 0xFF0000u32).await;
-                            return;
-                        }
-                        if author.id != guild.owner_id && role.position >= author_highest {
-                            send_embed(&self.http, channel, "❌ Role Hierarchy Violation",
-                                &format!("You cannot assign {} because it is equal to or higher than your own highest role.", role.mention()),
-                                0xFF0000u32).await;
-                            return;
-                        }
+                        sembed!("Role Already Assigned", "User already has this role.", 0xFFA500u32); return;
                     }
                     let _ = member.add_role(&self.http, role.id).await;
-                    self.db.log_action(gid, target.id, "ROLE GIVEN",
-                        &format!("{} by {}", role.name, author.tag())).await;
+                    self.db.log_action(gid, target.id, "ROLE GIVEN", &format!("{}", role.name)).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("Role Assigned")
-                        .description(format!("Successfully gave {} the role {}", target.mention(), role.mention()))
+                        .description(format!("Gave {} the role {}", target.mention(), role.mention()))
                         .color(EMBED_COLOR).timestamp(now_ts())
-                        .field("User", target.mention(), true)
-                        .field("Role", role.mention(), true)
-                        .field("Given by", author.mention(), true)
-                        .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()));
+                        .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ User Not Found",
-                        "Could not find that member.", 0xFF0000u32).await;
+                    sembed!("❌ User Not Found", "Could not find that member.", 0xFF0000u32);
                 }
             }
             "iplookup" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing IP",
-                        "Usage: `xiplookup <ip_address>`", 0xFF0000u32).await;
-                    return;
-                }
-                let ip = rest[0];
-                let ip_re = Regex::new(
-                    r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
-                ).unwrap();
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
+                let ip = match rest.first() {
+                    Some(i) => *i,
+                    None => { sembed!("❌ Missing IP", "Usage: `xiplookup <ip>`", 0xFF0000u32); return; }
+                };
+                let ip_re = Regex::new(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$").unwrap();
                 if !ip_re.is_match(ip) {
-                    send_embed(&self.http, channel, "❌ Invalid IP Address",
-                        "Please provide a valid IPv4 address (e.g., 8.8.8.8)", 0xFF0000u32).await;
-                    return;
-                }
-                let private = Regex::new(
-                    r"^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|127\.|169\.254\.|0\.)"
-                ).unwrap();
-                if private.is_match(ip) {
-                    send_embed(&self.http, channel, "[+] Private IP Address",
-                        "This appears to be a private/local IP address. Geolocation data may not be available.",
-                        0xFFA500u32).await;
-                    return;
+                    sembed!("❌ Invalid IP", "Please provide a valid IPv4 address.", 0xFF0000u32); return;
                 }
                 match reqwest::get(&format!("http://ip-api.com/json/{}", ip)).await {
                     Ok(resp) => match resp.json::<serde_json::Value>().await {
-                        Ok(data) => if data["status"].as_str() == Some("success") {
+                        Ok(data) if data["status"].as_str() == Some("success") => {
                             let lat = data["lat"].as_f64().unwrap_or(0.0);
                             let lon = data["lon"].as_f64().unwrap_or(0.0);
                             let mut embed = CreateEmbed::default();
-                            embed.title("[+] IP Address Lookup")
-                                .description(format!("[+] Information for IP: `{}`", ip))
-                                .color(0x0099FFu32).timestamp(now_ts())
-                                .field("[+] City", data["city"].as_str().unwrap_or("Unknown"), true)
-                                .field("[+] Region", data["regionName"].as_str().unwrap_or("Unknown"), true)
-                                .field("[+] Country", format!("{} ({})",
-                                    data["country"].as_str().unwrap_or("Unknown"),
-                                    data["countryCode"].as_str().unwrap_or("N/A")), true)
-                                .field("[+] ISP", data["isp"].as_str().unwrap_or("Unknown"), true)
-                                .field("[+] Organization", data["org"].as_str().unwrap_or("Unknown"), true)
-                                .field("[+] AS", data["as"].as_str().unwrap_or("Unknown"), true)
-                                .field("[+] Coordinates", format!("{}, {}", lat, lon), true)
-                                .field("[+] Timezone", data["timezone"].as_str().unwrap_or("Unknown"), true)
-                                .field("[+] ZIP Code", data["zip"].as_str().unwrap_or("Unknown"), true);
-                            if lat != 0.0 && lon != 0.0 {
-                                embed.field("[+] Google Maps",
-                                    format!("[View on Maps](https://www.google.com/maps/search/?api=1&query={},{})", lat, lon), false);
-                            }
-                            embed.field("[+] Note",
-                                "IP geolocation is approximate and may not reflect the exact physical location.", false)
-                                .footer(|f| f.text("IP Lookup Service")
-                                    .icon_url(ctx.cache.current_user().avatar_url().unwrap_or_default()));
+                            embed.title("[+] IP Address Lookup").color(0x0099FFu32).timestamp(now_ts())
+                                .field("City",    data["city"].as_str().unwrap_or("Unknown"), true)
+                                .field("Region",  data["regionName"].as_str().unwrap_or("Unknown"), true)
+                                .field("Country", format!("{} ({})", data["country"].as_str().unwrap_or("Unknown"), data["countryCode"].as_str().unwrap_or("N/A")), true)
+                                .field("ISP",     data["isp"].as_str().unwrap_or("Unknown"), true)
+                                .field("AS",      data["as"].as_str().unwrap_or("Unknown"), true)
+                                .field("Coords",  format!("{}, {}", lat, lon), true)
+                                .field("TZ",      data["timezone"].as_str().unwrap_or("Unknown"), true)
+                                .footer(|f| f.text("IP Lookup Service"));
                             let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                        } else {
-                            send_embed(&self.http, channel, "❌ Lookup Failed",
-                                "Could not retrieve information for this IP address.", 0xFF0000u32).await;
-                        },
-                        Err(_) => { send_embed(&self.http, channel, "❌ Service Unavailable",
-                            "IP lookup service is currently unavailable.", 0xFF0000u32).await; }
+                        }
+                        _ => { sembed!("❌ Lookup Failed", "Could not retrieve info for this IP.", 0xFF0000u32); }
                     },
-                    Err(_) => { send_embed(&self.http, channel, "❌ Service Unavailable",
-                        "IP lookup service is currently unavailable.", 0xFF0000u32).await; }
+                    Err(_) => { sembed!("❌ Service Unavailable", "IP lookup service unavailable.", 0xFF0000u32); }
                 }
             }
             "ipgrab" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                let target = if let Some(u) = msg.mentions.iter().next() { u } else { author };
-                let (fake_ip, city, province, region, isp, lat, lon) = {
-                    use rand::Rng;
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
+                let target = if let Some(u) = msg.mentions.iter().next() { u.clone() } else { author.clone() };
+                let (fake_ip, city, province, isp, lat, lon) = {
                     let mut rng = rand::thread_rng();
-                    let ph_ranges = ["202.90","203.177","210.213","218.108","124.105",
-                                     "112.198","180.190","49.144","103.10","27.109"];
-                    let fake_ip = format!("{}.{}.{}", ph_ranges[rng.gen::<usize>() % ph_ranges.len()],
-                        rng.gen::<u8>() % 255 + 1, rng.gen::<u8>() % 255 + 1);
-                    let cities = ["Manila","Quezon City","Makati","Cebu City","Davao City","Taguig",
-                                  "Pasig","Antipolo","Caloocan","Zamboanga City","Las Piñas","Bacoor",
-                                  "Muntinlupa","Parañaque","Valenzuela","Iloilo City","Bacolod",
-                                  "Cagayan de Oro","General Santos","Baguio"];
-                    let provinces = ["Metro Manila","Cebu","Davao del Sur","Cavite","Rizal","Laguna",
-                                     "Bulacan","Pampanga","Batangas","Zambales","Iloilo",
-                                     "Negros Occidental","Misamis Oriental","South Cotabato","Benguet"];
-                    let regions = ["National Capital Region (NCR)","Central Luzon","CALABARZON",
-                                   "Central Visayas","Davao Region","Western Visayas",
-                                   "Northern Mindanao","SOCCSKSARGEN","Cordillera Administrative Region"];
-                    let isps = ["PLDT Inc.","Globe Telecom","Smart Communications","Sky Broadband",
-                                "Converge ICT","DITO Telecommunity","Eastern Communications",
-                                "Philippine Long Distance Telephone Company","Bayantel","Sun Cellular"];
-                    let city     = cities[rng.gen::<usize>() % cities.len()];
-                    let province = provinces[rng.gen::<usize>() % provinces.len()];
-                    let region   = regions[rng.gen::<usize>() % regions.len()];
-                    let isp      = isps[rng.gen::<usize>() % isps.len()];
+                    let ph_ranges = ["202.90","203.177","210.213","218.108","124.105","112.198","180.190"];
+                    let fake_ip = format!("{}.{}.{}", ph_ranges[rng.gen::<usize>() % ph_ranges.len()], rng.gen::<u8>(), rng.gen::<u8>());
+                    let cities = ["Manila","Quezon City","Makati","Cebu City","Davao City","Taguig","Pasig"];
+                    let provinces = ["Metro Manila","Cebu","Davao del Sur","Cavite","Rizal"];
+                    let isps = ["PLDT Inc.","Globe Telecom","Smart Communications","Sky Broadband","Converge ICT"];
                     let lat: f64 = rng.gen::<f64>() * (21.0 - 4.5) + 4.5;
                     let lon: f64 = rng.gen::<f64>() * (127.0 - 116.0) + 116.0;
-                    (fake_ip, city.to_string(), province.to_string(), region.to_string(), isp.to_string(), lat, lon)
+                    (fake_ip, cities[rng.gen::<usize>() % cities.len()].to_string(), provinces[rng.gen::<usize>() % provinces.len()].to_string(), isps[rng.gen::<usize>() % isps.len()].to_string(), lat, lon)
                 };
-
                 let mut embed = CreateEmbed::default();
-                embed.title("IP GRAB - @Null, X")
+                embed.title("IP GRAB").color(0xFF0000u32).timestamp(now_ts())
                     .description(format!("**@GRABBED: {}**", target.name))
-                    .color(0xFF0000u32).timestamp(now_ts())
-                    .field("[+] Target", target.mention(), true)
-                    .field("[+] IP Address", format!("`{}`", fake_ip), true)
-                    .field("[+] Status", "**CONFIRMED**", true)
-                    .field("[+] City", city, true)
-                    .field("[+] Province", province, true)
-                    .field("[+] Region", region, true)
-                    .field("[+] ISP Provider", isp, true)
-                    .field("[+] Country", "Philippines", true)
-                    .field("[+] Timezone", "PHT (UTC+8)", true)
-                    .field("[+] Coordinates", format!("{:.6}, {:.6}", lat, lon), true)
-                    .field("[+] Timestamp", now_pht().format("%H:%M:%S UTC").to_string(), true)
-                    .field("[+] Encryption", "**BYPASSED**", true)
-                    .field("[+] Location",
-                        format!("[IP Lookup](https://www.google.com/maps/search/?api=1&query={},{})", lat, lon), false)
+                    .field("IP",      format!("`{}`", fake_ip), true)
+                    .field("Status",  "**CONFIRMED**", true)
+                    .field("City",    city, true)
+                    .field("Province", province, true)
+                    .field("ISP",     isp, true)
+                    .field("Country", "Philippines", true)
+                    .field("Coords",  format!("{:.6}, {:.6}", lat, lon), true)
                     .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
                     .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let mut reveal = CreateEmbed::default();
                 reveal.title("😂 Got You!")
-                    .description(format!(
-                        "Relax {}, that was **100% FAKE**!\nNo actual IP was captured. Discord does not expose user IPs.",
-                        target.mention()
-                    ))
+                    .description(format!("Relax {}, that was **100% FAKE**!\nNo actual IP was captured. Discord does not expose user IPs.", target.mention()))
                     .color(0x00FF00u32).timestamp(now_ts())
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Stay safe online 💚"));
-                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                    .footer(|f| f.text("Stay safe online 💚"));
+                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = reveal.clone(); e })).await;
             }
             "status" => {
-                if !is_admin {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Administrator permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing Status",
-                        "Usage: `xstatus <online/dnd/invisible>`", 0xFF0000u32).await;
-                    return;
-                }
-                let status_str = rest[0].to_lowercase();
+                if !is_admin { sembed!("❌ Missing Permissions", "Need Administrator.", 0xFF0000u32); return; }
+                let status_str = match rest.first() {
+                    Some(s) => s.to_lowercase(),
+                    None => { sembed!("❌ Missing Status", "Usage: `xstatus <online/dnd/invisible>`", 0xFF0000u32); return; }
+                };
                 let status = match status_str.as_str() {
-                    "online" => serenity::model::user::OnlineStatus::Online,
-                    "dnd" => serenity::model::user::OnlineStatus::DoNotDisturb,
+                    "online"    => serenity::model::user::OnlineStatus::Online,
+                    "dnd"       => serenity::model::user::OnlineStatus::DoNotDisturb,
                     "invisible" => serenity::model::user::OnlineStatus::Invisible,
-                    _ => { send_embed(&self.http, channel, "❌ Invalid Status",
-                        "Valid statuses: `online`, `dnd`, `invisible`", 0xFF0000u32).await; return; }
+                    _ => { sembed!("❌ Invalid Status", "Valid: `online`, `dnd`, `invisible`", 0xFF0000u32); return; }
                 };
                 let server_count = ctx.cache.guilds().len();
                 ctx.set_presence(
-                    Some(serenity::model::gateway::Activity::watching(
-                        format!("over {} servers!", server_count))),
+                    Some(serenity::model::gateway::Activity::watching(format!("over {} servers!", server_count))),
                     status,
                 ).await;
-                let color = if status_str == "online" { 0x00FF00u32 }
-                    else if status_str == "dnd" { 0xFF0000u32 }
-                    else { 0x808080u32 };
-                let mut embed = CreateEmbed::default();
-                embed.title("Status Updated")
-                    .description(format!("Bot status changed to **{}**", status_str.to_uppercase()))
-                    .color(color).timestamp(now_ts())
-                    .field("Activity", format!("over {} servers!", server_count), false)
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Status System")
-                        .icon_url(ctx.cache.current_user().avatar_url().unwrap_or_default()));
-                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                sembed!("Status Updated", &format!("Bot status changed to **{}**", status_str.to_uppercase()), 0x00FF00u32);
             }
             "violations" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                let target = if let Some(u) = msg.mentions.iter().next() { u } else { author };
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
+                let target = if let Some(u) = msg.mentions.iter().next() { u.clone() } else { author.clone() };
                 let vcount = self.state.user_violations.get(&target.id).map(|c| *c).unwrap_or(0);
-                let wcount = self.state.user_warnings.get(&target.id)
-                    .map(|w| w.iter().filter(|w| w.guild_id == gid).count()).unwrap_or(0);
+                let wcount = self.state.user_warnings.get(&target.id).map(|w| w.iter().filter(|w| w.guild_id == gid).count()).unwrap_or(0);
                 let is_muted = self.state.muted_users.contains_key(&target.id);
                 let (risk, color) = if vcount == 0 { ("Clean Record", 0x00FF00u32) }
                     else if vcount < 3 { ("Low Risk", 0xFFFF00u32) }
                     else if vcount < 5 { ("Medium Risk", 0xFF8000u32) }
                     else { ("High Risk", 0xFF0000u32) };
-                let account_age = (now_pht().timestamp() - target.created_at().timestamp()) / 86400;
-                let join_age = if let Ok(member) = gid.member(&self.http, target.id).await {
-                    member.joined_at.map(|j| (now_pht().timestamp() - j.timestamp()) / 86400).unwrap_or(0)
-                } else { 0 };
                 let mut embed = CreateEmbed::default();
-                embed.title("User Violations Report")
-                    .description(format!("Security record for {}", target.mention()))
-                    .color(color).timestamp(now_ts())
+                embed.title("User Violations Report").color(color).timestamp(now_ts())
                     .field("Security Violations", vcount.to_string(), true)
                     .field("Warnings", wcount.to_string(), true)
-                    .field("Currently Muted", if is_muted { "Yes" } else { "No" }, true)
+                    .field("Muted", if is_muted { "Yes" } else { "No" }, true)
                     .field("Risk Level", risk, false)
-                    .field("Account Age", format!("{} days", account_age), true)
-                    .field("Days in Server", format!("{} days", join_age), true)
                     .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
-                    .footer(|f| f.text("Coded by ransxmware.xyz — User Report"));
-                if is_muted {
-                    if let Some(until) = self.state.muted_users.get(&target.id) {
-                        embed.field("Mute Expires", until.to_rfc3339(), true);
-                    }
-                }
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "clearviolations" => {
-                if !is_admin {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Administrator permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xclearviolations @user`", 0xFF0000u32).await;
-                    return;
-                }
+                if !is_admin { sembed!("❌ Missing Permissions", "Need Administrator.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xclearviolations @user`", 0xFF0000u32); return; }
                 };
                 let old = self.state.user_violations.get(&target.id).map(|c| *c).unwrap_or(0);
                 self.state.user_violations.insert(target.id, 0);
@@ -2854,14 +2371,11 @@ impl Handler {
                     warns.retain(|w| w.guild_id != gid);
                 }
                 let mut embed = CreateEmbed::default();
-                embed.title("Violations Cleared")
-                    .description(format!("Cleared all violations for {}", target.mention()))
-                    .color(0x00FF00u32).timestamp(now_ts())
-                    .field("Previous Violations", old.to_string(), true)
-                    .field("Current Violations", "0".to_string(), true)
+                embed.title("Violations Cleared").color(0x00FF00u32).timestamp(now_ts())
+                    .field("Previous", old.to_string(), true)
+                    .field("Current", "0", true)
                     .field("Cleared by", author.mention(), true)
-                    .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Violation Management"));
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "ping" => {
@@ -2870,242 +2384,92 @@ impl Handler {
                     Ok(m) => m, Err(_) => return
                 };
                 let api_latency = start.elapsed().as_millis();
-                let (api_quality, api_color) = if api_latency < 80 { ("🟢 Excellent", 0x00FF7Fu32) }
+                let (quality, color) = if api_latency < 80 { ("🟢 Excellent", 0x00FF7Fu32) }
                     else if api_latency < 150 { ("🟡 Good", 0xFFFF00u32) }
                     else if api_latency < 300 { ("🟠 Fair", 0xFF8C00u32) }
                     else { ("🔴 Poor", 0xFF0000u32) };
-                let rl_status = if let Some(until) = self.state.rate_limited_until.get(&author.id) {
-                    if *until > now_pht() {
-                        format!("⏱️ Rate-limited — {}s remaining",
-                            (until.timestamp() - now_pht().timestamp()))
-                    } else { "✅ Not rate-limited".to_string() }
-                } else { "✅ Not rate-limited".to_string() };
-                let now_ts_f = now_pht().timestamp_millis() as f64 / 1000.0;
-                let recent_cmds = self.state.command_timestamps.get(&author.id)
-                    .map(|ts| ts.iter().filter(|t| now_ts_f - **t <= RATE_LIMIT_WINDOW_SECS).count())
-                    .unwrap_or(0);
-                let cmd_budget = format!("{}/{} commands used in last {}s",
-                    recent_cmds, RATE_LIMIT_MAX_COMMANDS, RATE_LIMIT_WINDOW_SECS);
                 let mut embed = CreateEmbed::default();
-                embed.title("🏓 Pong!").color(api_color).timestamp(now_ts())
-                    .field("🌐 API Round-Trip", format!("`{}ms` — {}", api_latency, api_quality), true)
-                    .field("⚙️ API Semaphore",
-                        format!("`{}/20` slots free", self.state.api_semaphore.available_permits()), true)
-                    .field("🛡️ Your Rate-Limit Status", rl_status, true)
-                    .field("📊 Command Budget", cmd_budget, true)
-                    .footer(|f| f.text("Coded by ransxmware.xyz — Ping Checker"));
+                embed.title("🏓 Pong!").color(color).timestamp(now_ts())
+                    .field("API Round-Trip", format!("`{}ms` — {}", api_latency, quality), true)
+                    .field("Semaphore", format!("`{}/20` free", self.state.api_semaphore.available_permits()), true)
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = sent.edit(&self.http, |e| e.content("").embed(|em| { *em = embed.clone(); em })).await;
             }
             "kick" => {
-                if !kick_members {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Kick Members permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xkick @user [reason]`", 0xFF0000u32).await;
-                    return;
-                }
+                if !kick_members { sembed!("❌ Missing Permissions", "Need Kick Members.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xkick @user [reason]`", 0xFF0000u32); return; }
                 };
                 let reason = if rest.len() > 1 { rest[1..].join(" ") } else { "No reason provided".to_string() };
+                if target.id == author.id { sembed!("❌ Cannot Kick Yourself", "You cannot kick yourself!", 0xFF0000u32); return; }
                 if let Ok(member) = gid.member(&self.http, target.id).await {
-                    if target.id == author.id {
-                        send_embed(&self.http, channel, "❌ Cannot Kick Yourself",
-                            "You cannot kick yourself!", 0xFF0000u32).await; return;
-                    }
-                    if gid.to_guild_cached(&ctx.cache).map(|g| g.owner_id) == Some(target.id) {
-                        send_embed(&self.http, channel, "❌ Cannot Kick Owner",
-                            "You cannot kick the server owner.", 0xFF0000u32).await; return;
-                    }
-                    if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
-                        let bot_id = ctx.cache.current_user().id;
-                        let bot_highest = guild.members.get(&bot_id)
-                            .and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r))
-                                .max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
-                        let target_highest = member.roles.iter().filter_map(|r| guild.roles.get(r))
-                            .max_by_key(|r| r.position).map(|r| r.position).unwrap_or(0);
-                        let author_highest = guild.members.get(&author.id)
-                            .and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r))
-                                .max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
-                        if target_highest >= bot_highest {
-                            send_embed(&self.http, channel, "❌ Role Hierarchy",
-                                "I cannot kick someone with an equal or higher role than me.", 0xFF0000u32).await;
-                            return;
-                        }
-                        if author.id != guild.owner_id && target_highest >= author_highest {
-                            send_embed(&self.http, channel, "❌ Role Hierarchy",
-                                "You cannot kick someone with an equal or higher role than you.", 0xFF0000u32).await;
-                            return;
-                        }
-                    }
-                    let guild_name = ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_else(|| "this server".to_string());
-                    let author_tag = author.tag();
-                    let target_tag = target.tag();
-                    let target_avatar = target.avatar_url().unwrap_or_else(|| target.default_avatar_url());
-                    let mut dm = CreateEmbed::default();
-                    dm.title("You have been kicked")
-                        .description(format!("You were kicked from **{}**", guild_name))
-                        .color(0xFF4500u32).timestamp(now_ts())
-                        .field("Reason", reason.clone(), false)
-                        .field("Moderator", author_tag.clone(), true);
-                    let _ = target.direct_message(&self.http, |m| m.embed(|e| { *e = dm.clone(); e })).await;
                     let _ = member.kick_with_reason(&self.http, &reason).await;
-                    self.db.log_action(gid, target.id, "KICK",
-                        &format!("by {} — {}", author_tag, reason)).await;
+                    self.db.log_action(gid, target.id, "KICK", &format!("by {} — {}", author.tag(), reason)).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("👢 Member Kicked")
-                        .description(format!("{} has been kicked from the server.", target.mention()))
+                        .description(format!("{} has been kicked.", target.mention()))
                         .color(0xFF4500u32).timestamp(now_ts())
-                        .field("User", format!("{} (`{}`)", target_tag, target.id), true)
-                        .field("Moderator", author.mention(), true)
                         .field("Reason", reason, false)
-                        .thumbnail(target_avatar)
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Moderation"));
+                        .field("By", author.mention(), true)
+                        .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
+                        .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                    if let Some(log_id) = gid.channels(&self.http).await.ok()
-                        .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
-                    {
-                        if log_id != channel {
-                            let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                        }
-                    }
                 } else {
-                    send_embed(&self.http, channel, "❌ User Not Found",
-                        "Could not find that member.", 0xFF0000u32).await;
+                    sembed!("❌ User Not Found", "Could not find that member.", 0xFF0000u32);
                 }
             }
             "ban" => {
-                if !ban_members {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Ban Members permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xban @user [reason]`", 0xFF0000u32).await;
-                    return;
-                }
+                if !ban_members { sembed!("❌ Missing Permissions", "Need Ban Members.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xban @user [reason]`", 0xFF0000u32); return; }
                 };
                 let reason = if rest.len() > 1 { rest[1..].join(" ") } else { "No reason provided".to_string() };
+                if target.id == author.id { sembed!("❌ Cannot Ban Yourself", "You cannot ban yourself!", 0xFF0000u32); return; }
                 if let Ok(member) = gid.member(&self.http, target.id).await {
-                    if target.id == author.id {
-                        send_embed(&self.http, channel, "❌ Cannot Ban Yourself",
-                            "You cannot ban yourself!", 0xFF0000u32).await; return;
-                    }
-                    if gid.to_guild_cached(&ctx.cache).map(|g| g.owner_id) == Some(target.id) {
-                        send_embed(&self.http, channel, "❌ Cannot Ban Owner",
-                            "You cannot ban the server owner.", 0xFF0000u32).await; return;
-                    }
-                    if let Some(guild) = gid.to_guild_cached(&ctx.cache) {
-                        let bot_id = ctx.cache.current_user().id;
-                        let bot_highest = guild.members.get(&bot_id)
-                            .and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r))
-                                .max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
-                        let target_highest = member.roles.iter().filter_map(|r| guild.roles.get(r))
-                            .max_by_key(|r| r.position).map(|r| r.position).unwrap_or(0);
-                        let author_highest = guild.members.get(&author.id)
-                            .and_then(|m| m.roles.iter().filter_map(|r| guild.roles.get(r))
-                                .max_by_key(|r| r.position)).map(|r| r.position).unwrap_or(0);
-                        if target_highest >= bot_highest {
-                            send_embed(&self.http, channel, "❌ Role Hierarchy",
-                                "I cannot ban someone with an equal or higher role than me.", 0xFF0000u32).await;
-                            return;
-                        }
-                        if author.id != guild.owner_id && target_highest >= author_highest {
-                            send_embed(&self.http, channel, "❌ Role Hierarchy",
-                                "You cannot ban someone with an equal or higher role than you.", 0xFF0000u32).await;
-                            return;
-                        }
-                    }
-                    let guild_name = ctx.cache.guild(gid).map(|g| g.name.clone()).unwrap_or_else(|| "this server".to_string());
-                    let author_tag = author.tag();
-                    let target_tag = target.tag();
-                    let target_avatar = target.avatar_url().unwrap_or_else(|| target.default_avatar_url());
-                    let mut dm = CreateEmbed::default();
-                    dm.title("🔨 You have been banned")
-                        .description(format!("You were banned from **{}**", guild_name))
-                        .color(0xFF0000u32).timestamp(now_ts())
-                        .field("Reason", reason.clone(), false)
-                        .field("Moderator", author_tag.clone(), true);
-                    let _ = target.direct_message(&self.http, |m| m.embed(|e| { *e = dm.clone(); e })).await;
                     let _ = member.ban_with_reason(&self.http, 0, &reason).await;
-                    self.db.log_action(gid, target.id, "BAN",
-                        &format!("by {} — {}", author_tag, reason)).await;
+                    self.db.log_action(gid, target.id, "BAN", &format!("by {} — {}", author.tag(), reason)).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("🔨 Member Banned")
                         .description(format!("{} has been permanently banned.", target.mention()))
                         .color(0xFF0000u32).timestamp(now_ts())
-                        .field("User", format!("{} (`{}`)", target_tag, target.id), true)
-                        .field("Moderator", author.mention(), true)
                         .field("Reason", reason, false)
-                        .thumbnail(target_avatar)
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Moderation"));
+                        .field("By", author.mention(), true)
+                        .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()))
+                        .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                    if let Some(log_id) = gid.channels(&self.http).await.ok()
-                        .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
-                    {
-                        if log_id != channel {
-                            let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                        }
-                    }
                 } else {
-                    send_embed(&self.http, channel, "❌ User Not Found",
-                        "Could not find that member.", 0xFF0000u32).await;
+                    sembed!("❌ User Not Found", "Could not find that member.", 0xFF0000u32);
                 }
             }
             "unban" => {
-                if !ban_members {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Ban Members permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xunban <@user / username / user ID>`", 0xFF0000u32).await;
-                    return;
-                }
+                if !ban_members { sembed!("❌ Missing Permissions", "Need Ban Members.", 0xFF0000u32); return; }
                 let query = rest.join(" ").trim().to_string();
+                if query.is_empty() {
+                    sembed!("❌ Missing User", "Usage: `xunban <user ID or username>`", 0xFF0000u32); return;
+                }
                 let bans = gid.bans(&self.http).await.unwrap_or_default();
-                let mut target = None;
+                let mut found_user: Option<User> = None;
                 if let Ok(uid) = query.parse::<u64>() {
-                    target = bans.iter().find(|b| b.user.id.0 == uid).map(|b| &b.user);
+                    found_user = bans.iter().find(|b| b.user.id.0 == uid).map(|b| b.user.clone());
                 }
-                if target.is_none() {
+                if found_user.is_none() {
                     let lower = query.to_lowercase();
-                    target = bans.iter().find(|b| b.user.name.to_lowercase().contains(&lower)).map(|b| &b.user);
+                    found_user = bans.iter().find(|b| b.user.name.to_lowercase().contains(&lower)).map(|b| b.user.clone());
                 }
-                if let Some(user) = target {
+                if let Some(user) = found_user {
                     let _ = gid.unban(&self.http, user.id).await;
-                    self.db.log_action(gid, user.id, "UNBAN",
-                        &format!("by {}", author.tag())).await;
+                    self.db.log_action(gid, user.id, "UNBAN", &format!("by {}", author.tag())).await;
                     let mut embed = CreateEmbed::default();
                     embed.title("✅ Member Unbanned")
-                        .description(format!("**{}** has been unbanned and can rejoin the server.", user.tag()))
+                        .description(format!("**{}** has been unbanned.", user.tag()))
                         .color(0x00FF00u32).timestamp(now_ts())
-                        .field("User", format!("{} (`{}`)", user.tag(), user.id), true)
-                        .field("Moderator", author.mention(), true)
-                        .thumbnail(user.avatar_url().unwrap_or_else(|| user.default_avatar_url()))
-                        .footer(|f| f.text("Coded by ransxmware.xyz — Moderation"));
+                        .field("By", author.mention(), true)
+                        .footer(|f| f.text("Coded by ransxmware.xyz"));
                     let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                    if let Some(log_id) = gid.channels(&self.http).await.ok()
-                        .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
-                    {
-                        if log_id != channel {
-                            let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                        }
-                    }
                 } else {
-                    send_embed(&self.http, channel, "❌ User Not Found in Ban List",
-                        "Could not find that user in the ban list. Try using their user ID.", 0xFF0000u32).await;
+                    sembed!("❌ User Not Found", "Could not find that user in the ban list. Try using their user ID.", 0xFF0000u32);
                 }
             }
             "av" => {
@@ -3125,258 +2489,124 @@ impl Handler {
                     embed.color(EMBED_COLOR)
                         .image(user.avatar_url().unwrap_or_else(|| user.default_avatar_url()));
                     let _ = channel.send_message(&self.http, |m| {
-                        m.content(format!("Here is {}'s avatar.", user.mention()))
+                        m.content(format!("Avatar for {}", user.mention()))
                          .embed(|e| { *e = embed.clone(); e })
                     }).await;
                 } else {
-                    send_embed(&self.http, channel, "❌ User Not Found",
-                        "No member found matching that name.", 0xFF0000u32).await;
+                    sembed!("❌ User Not Found", "No member found matching that name.", 0xFF0000u32);
                 }
             }
             "serverinfo" => {
                 let guild = match gid.to_guild_cached(&ctx.cache) {
                     Some(g) => g,
-                    None => { send_embed(&self.http, channel, "❌ Error",
-                        "Guild not cached yet.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Error", "Guild not cached.", 0xFF0000u32); return; }
                 };
-                let owner = if let Some(m) = guild.members.get(&guild.owner_id).cloned() {
-                    m.user
-                } else {
-                    match guild.owner_id.to_user(&self.http).await {
+                let owner = match guild.members.get(&guild.owner_id).cloned() {
+                    Some(m) => m.user,
+                    None => match guild.owner_id.to_user(&self.http).await {
                         Ok(u) => u,
-                        Err(_) => { send_embed(&self.http, channel, "❌ Error",
-                            "Could not fetch server owner.", 0xFF0000u32).await; return; }
+                        Err(_) => { sembed!("❌ Error", "Could not fetch owner.", 0xFF0000u32); return; }
                     }
                 };
-                let created = guild.id.created_at();
-                let delta = now_pht().timestamp() - created.timestamp();
-                let days = delta / 86400;
-                let relative = if days >= 365 { format!("{} year(s) ago", days / 365) }
-                    else if days >= 30 { format!("{} month(s) ago", days / 30) }
-                    else { format!("{} day(s) ago", days) };
-                let created_str = format!("{} ({})", created.format("%B %d, %Y at %I:%M %p"), relative);
+                let boost_level = premium_tier_num(guild.premium_tier);
+                let boost_count = guild.premium_subscription_count;
                 let channels = gid.channels(&self.http).await.unwrap_or_default();
                 let text  = channels.values().filter(|c| c.kind == ChannelType::Text).count();
                 let voice = channels.values().filter(|c| c.kind == ChannelType::Voice).count();
                 let cats  = channels.values().filter(|c| c.kind == ChannelType::Category).count();
-                let total_ch = text + voice;
-                let bots = guild.members.values().filter(|m| m.user.bot).count();
-                let boost_level = guild.premium_tier;
-                let boost_count = guild.premium_subscription_count;
-                let boost_str = format!("{} Boost{} (Level {})",
-                    boost_count,
-                    if boost_count != 1 { "s" } else { "" },
-                    premium_tier_num(boost_level));
-                let emojis: String = guild.emojis.values().map(|e| e.to_string()).collect();
                 let mut embed = CreateEmbed::default();
-                embed.title(format!("☁️  {}", guild.name))
-                    .description(guild.description.clone().unwrap_or_default())
-                    .color(EMBED_COLOR).timestamp(now_ts());
-                if let Some(icon) = guild.icon_url() { embed.thumbnail(icon); }
-                if let Some(banner) = guild.banner_url() { embed.image(banner); }
-                embed.field("Server Owner", format!("{} ({})", owner.mention(), owner.name), false)
+                embed.title(format!("☁️ {}", guild.name))
+                    .color(EMBED_COLOR).timestamp(now_ts())
+                    .field("Owner", format!("{} ({})", owner.mention(), owner.name), false)
                     .field("ID", guild.id.0.to_string(), false)
                     .field("Members", guild.member_count.to_string(), false)
-                    .field("Server Boost Status", boost_str, false)
+                    .field("Boosts", format!("{} (Level {})", boost_count, boost_level), false)
                     .field("Roles", guild.roles.len().to_string(), false)
-                    .field("Channels", format!("{} ({} text · {} voice · {} categories)",
-                        total_ch, text, voice, cats), false)
-                    .field("Created", created_str, false);
-                if !emojis.is_empty() { embed.field("Emoji List", emojis, false); }
-                embed.footer(|f| f.text(format!("Null, X | Today at {}", now_pht().format("%I:%M %p")))
-                    .icon_url(ctx.cache.current_user().avatar_url().unwrap_or_default()));
+                    .field("Channels", format!("{} text · {} voice · {} categories", text, voice, cats), false);
+                if let Some(icon) = guild.icon_url() { embed.thumbnail(icon); }
+                embed.footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "addlink" => {
-                if !is_admin {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Administrator permission.", 0xFF0000u32).await;
-                    return;
+                if !is_admin { sembed!("❌ Missing Permissions", "Need Administrator.", 0xFF0000u32); return; }
+                let domain = match rest.first() {
+                    Some(d) => d.to_lowercase().trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or(d).to_string(),
+                    None => { sembed!("❌ Missing Domain", "Usage: `xaddlink <domain>`", 0xFF0000u32); return; }
+                };
+                {
+                    let mut cfg = self.state.guild_configs.entry(gid).or_insert_with(GuildSecurityConfig::default);
+                    if cfg.link_whitelist.contains(&domain) {
+                        sembed!("❌ Already Whitelisted", "Domain already in list.", 0xFF0000u32); return;
+                    }
+                    cfg.link_whitelist.push(domain.clone());
+                    self.db.save_guild_config(gid, &cfg).await;
                 }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing Domain",
-                        "Usage: `xaddlink <domain>`\nExample: `xaddlink imgur.com`", 0xFF0000u32).await;
-                    return;
-                }
-                let mut domain = rest[0].to_lowercase();
-                domain = domain.trim_start_matches("https://").trim_start_matches("http://")
-                    .split('/').next().unwrap_or(&domain).to_string();
-                let mut cfg = self.state.guild_configs.get_mut(&gid).unwrap();
-                if cfg.link_whitelist.contains(&domain) {
-                    send_embed(&self.http, channel, "❌ Already Whitelisted",
-                        &format!("`{}` is already in the link whitelist.", domain), 0xFF0000u32).await;
-                    return;
-                }
-                cfg.link_whitelist.push(domain.clone());
-                self.db.save_guild_config(gid, &cfg).await;
-                let total = cfg.link_whitelist.len();
-                let mut embed = CreateEmbed::default();
-                embed.title("✅ Link Whitelisted")
-                    .description(format!("`{}` has been added to the allowed links.", domain))
-                    .color(0x00FF00u32).timestamp(now_ts())
-                    .field("Domain", format!("`{}`", domain), true)
-                    .field("Added by", author.mention(), true)
-                    .field("Total Allowed", total.to_string(), true)
-                    .footer(|f| f.text("Coded by ransxmware.xyz"));
-                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                sembed!("✅ Link Whitelisted", &format!("`{}` added to allowed links.", domain), 0x00FF00u32);
             }
             "removelink" => {
-                if !is_admin {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Administrator permission.", 0xFF0000u32).await;
-                    return;
+                if !is_admin { sembed!("❌ Missing Permissions", "Need Administrator.", 0xFF0000u32); return; }
+                let domain = match rest.first() {
+                    Some(d) => d.to_lowercase().trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or(d).to_string(),
+                    None => { sembed!("❌ Missing Domain", "Usage: `xremovelink <domain>`", 0xFF0000u32); return; }
+                };
+                {
+                    let mut cfg = self.state.guild_configs.entry(gid).or_insert_with(GuildSecurityConfig::default);
+                    let pos = cfg.link_whitelist.iter().position(|d| *d == domain);
+                    match pos {
+                        Some(p) => { cfg.link_whitelist.remove(p); self.db.save_guild_config(gid, &cfg).await; }
+                        None => { sembed!("❌ Not in Whitelist", "Domain not in list.", 0xFF0000u32); return; }
+                    }
                 }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing Domain",
-                        "Usage: `xremovelink <domain>`\nExample: `xremovelink imgur.com`", 0xFF0000u32).await;
-                    return;
-                }
-                let mut domain = rest[0].to_lowercase();
-                domain = domain.trim_start_matches("https://").trim_start_matches("http://")
-                    .split('/').next().unwrap_or(&domain).to_string();
-                let mut cfg = self.state.guild_configs.get_mut(&gid).unwrap();
-                let pos = cfg.link_whitelist.iter().position(|d| *d == domain);
-                if pos.is_none() {
-                    send_embed(&self.http, channel, "❌ Not in Whitelist",
-                        &format!("`{}` is not in the link whitelist.", domain), 0xFF0000u32).await;
-                    return;
-                }
-                if let Some(p) = pos { cfg.link_whitelist.remove(p); }
-                self.db.save_guild_config(gid, &cfg).await;
-                let total = cfg.link_whitelist.len();
-                let mut embed = CreateEmbed::default();
-                embed.title("✅ Link Removed")
-                    .description(format!("`{}` has been removed from the allowed links.", domain))
-                    .color(0x00FF00u32).timestamp(now_ts())
-                    .field("Domain", format!("`{}`", domain), true)
-                    .field("Removed by", author.mention(), true)
-                    .field("Total Allowed", total.to_string(), true)
-                    .footer(|f| f.text("Coded by ransxmware.xyz"));
-                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                sembed!("✅ Link Removed", &format!("`{}` removed from allowed links.", domain), 0x00FF00u32);
             }
             "history" => {
-                if !manage_msgs {
-                    send_embed(&self.http, channel, "❌ Missing Permissions",
-                        "You need Manage Messages permission.", 0xFF0000u32).await;
-                    return;
-                }
-                if rest.is_empty() {
-                    send_embed(&self.http, channel, "❌ Missing User",
-                        "Usage: `xhistory @user`", 0xFF0000u32).await;
-                    return;
-                }
+                if !manage_msgs { sembed!("❌ Missing Permissions", "Need Manage Messages.", 0xFF0000u32); return; }
                 let target = match msg.mentions.iter().next() {
                     Some(u) => u,
-                    None => { send_embed(&self.http, channel, "❌ Missing User",
-                        "Please mention a user.", 0xFF0000u32).await; return; }
+                    None => { sembed!("❌ Missing User", "Usage: `xhistory @user`", 0xFF0000u32); return; }
                 };
-                let rows = sqlx::query!(
-                    "SELECT action, reason, timestamp FROM action_history WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 15",
-                    gid.0 as i64, target.id.0 as i64
-                ).fetch_all(&self.db.pool).await.unwrap_or_default();
+                let rows = sqlx::query(
+                    "SELECT action, reason, timestamp FROM action_history WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 15"
+                )
+                .bind(gid.0 as i64)
+                .bind(target.id.0 as i64)
+                .fetch_all(&self.db.pool).await.unwrap_or_default();
                 let mut embed = CreateEmbed::default();
                 embed.title(format!("Action History — {}", target.name))
-                    .description(format!("Last {} recorded actions for {}", rows.len(), target.mention()))
                     .color(EMBED_COLOR).timestamp(now_ts())
                     .thumbnail(target.avatar_url().unwrap_or_else(|| target.default_avatar_url()));
                 if rows.is_empty() {
-                    embed.field("No History", "No recorded actions for this user in this server.", false);
+                    embed.field("No History", "No recorded actions for this user.", false);
                 } else {
-                    for row in rows {
-                        let dt = match DateTime::parse_from_rfc3339(&row.timestamp) {
-                            Ok(d) => d, Err(_) => continue
-                        };
-                        embed.field(
-                            format!("`{}` — {}", row.action, dt.format("%Y-%m-%d %H:%M UTC")),
-                            row.reason, false
-                        );
+                    for row in &rows {
+                        use sqlx::Row;
+                        let action: &str = row.get("action");
+                        let reason: &str = row.get("reason");
+                        let timestamp: &str = row.get("timestamp");
+                        embed.field(format!("`{}` — {}", action, timestamp), reason, false);
                     }
                 }
                 let violations = self.state.user_violations.get(&target.id).map(|c| *c).unwrap_or(0);
-                let warnings = self.state.user_warnings.get(&target.id)
-                    .map(|w| w.iter().filter(|w| w.guild_id == gid).count()).unwrap_or(0);
                 embed.field("User ID", format!("`{}`", target.id), true)
                     .field("Violations", violations.to_string(), true)
-                    .field("Warnings", warnings.to_string(), true)
-                    .footer(|f| f.text("Coded by ransxmware.xyz — History"));
+                    .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             "help" => {
-                if rest.is_empty() {
-                    let mut embed = CreateEmbed::default();
-                    embed.title("🛡️ Null, X : Security Menu").description("**REVSHIT**")
-                        .color(EMBED_COLOR).timestamp(now_ts())
-                        .field("🔒 Anti-Nuke Commands",
-                            "`xantinuke on/off` — Toggle anti-nuke protection\n`xsecurity on/off` — Toggle message security\n`xsetup` — Setup security logs channel\n`xconfig` — View security configuration\n`xstats` — View security statistics",
-                            true)
-                        .field("📋 Whitelist Commands",
-                            "`xwhitelistrole <@role>` — Whitelist a role\n`xunwhitelistrole <@role>` — Remove whitelisted role\n`xwhitelistuser <@user>` — Whitelist a user\n`xunwhitelistuser <@user>` — Remove whitelisted user\n`xwhitelistlist` — View whitelist\n`xbypasslink <@user/@role>` — Grant link bypass\n`xremovebypasslink <@user/@role>` — Revoke link bypass\n`xaddlink <domain>` — Add allowed link\n`xremovelink <domain>` — Remove allowed link",
-                            true)
-                        .field("\u{200b}", "\u{200b}", false)
-                        .field("⚔️ Moderation Commands",
-                            "`xpurge <amount>` — Delete messages\n`xwarn <@user> <reason>` — Warn a user\n`xmute <@user> [duration]` — Mute a user\n`xunmute <@user>` — Unmute a user\n`xkick <@user>` — Kick a user\n`xban <@user>` — Ban a user\n`xunban <@user/username/id>` — Unban a user\n`xrole <@user> <@role>` — Give role to user\n`xhistory <@user>` — View action history",
-                            true)
-                        .field("🔧 Utility Commands",
-                            "`xping` — Bot latency & rate-limit status\n`xiplookup <ip>` — Lookup IP information\n`xipgrab <@user>` — IP grab\n`xstatus <type>` — Set bot status\n`xav [@user]` — Show a user's avatar\n`xserverinfo` — Server information\n`xviolations <@user>` — Check user violations\n`xclearviolations <@user>` — Clear user violations",
-                            true)
-                        .field("\u{200b}", "\u{200b}", false)
-                        .field("ℹ️ Information",
-                            "`xhelp <command>` — Get detailed help for a command\n**Prefix:** `x` or `null` — e.g. `xban` or `nullban`",
-                            false)
-                        .footer(|f| f.text("Coded by ransxmware.xyz"))
-                        .thumbnail(ctx.cache.current_user().avatar_url().unwrap_or_default());
-                    let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                } else {
-                    let cmd_name = rest[0].to_lowercase();
-                    let help_map = std::collections::HashMap::from([
-                        ("antinuke", ("Toggle anti-nuke protection on or off", "xantinuke [on/off]", vec!["xantinuke on","xantinuke off","xantinuke"], "Administrator")),
-                        ("whitelistrole", ("Add a role to the anti-nuke whitelist", "xwhitelistrole @role", vec!["xwhitelistrole @Admin"], "Administrator")),
-                        ("unwhitelistrole", ("Remove a role from the anti-nuke whitelist", "xunwhitelistrole @role", vec!["xunwhitelistrole @Admin"], "Administrator")),
-                        ("whitelistuser", ("Add a user to the anti-nuke whitelist", "xwhitelistuser @user", vec!["xwhitelistuser @user"], "Administrator")),
-                        ("unwhitelistuser", ("Remove a user from the anti-nuke whitelist", "xunwhitelistuser @user", vec!["xunwhitelistuser @user"], "Administrator")),
-                        ("whitelistlist", ("View all whitelisted roles, users, and link bypasses", "xwhitelistlist", vec!["xwhitelistlist"], "Administrator")),
-                        ("bypasslink", ("Grant a user or role permission to post any link freely", "xbypasslink @user/@role", vec!["xbypasslink @user","xbypasslink @Moderator"], "Server Owner")),
-                        ("removebypasslink", ("Revoke a link bypass from a user or role", "xremovebypasslink @user/@role", vec!["xremovebypasslink @user","xremovebypasslink @Mod"], "Server Owner")),
-                        ("security", ("Toggle advanced message security features on or off", "xsecurity [on/off]", vec!["xsecurity on","xsecurity off"], "Administrator")),
-                        ("setup", ("Set up the security logs channel for the server", "xsetup", vec!["xsetup"], "Administrator")),
-                        ("config", ("View the current security and anti-nuke configuration", "xconfig", vec!["xconfig"], "Administrator")),
-                        ("stats", ("View security statistics for the server", "xstats", vec!["xstats"], "Manage Messages")),
-                        ("purge", ("Delete a specified number of messages from the current channel", "xpurge <amount>", vec!["xpurge 10","xpurge 50"], "Manage Messages")),
-                        ("warn", ("Issue a warning to a user with a specified reason", "xwarn @user <reason>", vec!["xwarn @user Spamming"], "Manage Messages")),
-                        ("mute", ("Temporarily mute a user", "xmute @user [duration] [reason]", vec!["xmute @user 10 Spamming"], "Manage Messages")),
-                        ("unmute", ("Remove mute from a user", "xunmute @user", vec!["xunmute @user"], "Manage Messages")),
-                        ("role", ("Give a role to a specified user", "xrole @user @role", vec!["xrole @user @Member"], "Manage Roles")),
-                        ("iplookup", ("Look up geolocation info about an IP address", "xiplookup <ip_address>", vec!["xiplookup 8.8.8.8"], "Manage Messages")),
-                        ("ipgrab", ("Generate a fake IP grab for fun/prank purposes", "xipgrab [@user]", vec!["xipgrab @user","xipgrab"], "Manage Messages")),
-                        ("status", ("Change the bot's Discord status", "xstatus <online/dnd/invisible>", vec!["xstatus online","xstatus dnd"], "Administrator")),
-                        ("violations", ("Check the security violations record for a user", "xviolations [@user]", vec!["xviolations @user","xviolations"], "Manage Messages")),
-                        ("clearviolations", ("Clear all security violations for a user", "xclearviolations @user", vec!["xclearviolations @user"], "Administrator")),
-                        ("ping", ("Check bot latency, API round-trip speed and your rate-limit status", "xping", vec!["xping"], "None (anyone)")),
-                        ("kick", ("Kick a member from the server", "xkick @user [reason]", vec!["xkick @user","xkick @user Raiding"], "Kick Members")),
-                        ("ban", ("Ban a member from the server", "xban @user [reason]", vec!["xban @user","xban @user Nuking"], "Ban Members")),
-                        ("unban", ("Unban a user by @mention, username, or user ID", "xunban <@user / username / user ID>", vec!["xunban 123456789","xunban someuser"], "Ban Members")),
-                        ("av", ("Show a user's full-size avatar", "xav [@user or username]", vec!["xav","xav @user","xav 0tnull"], "None (anyone)")),
-                        ("serverinfo", ("Display detailed server information", "xserverinfo", vec!["xserverinfo"], "None (anyone)")),
-                        ("addlink", ("Add a domain to the link whitelist", "xaddlink <domain>", vec!["xaddlink imgur.com"], "Administrator")),
-                        ("removelink", ("Remove a domain from the link whitelist", "xremovelink <domain>", vec!["xremovelink imgur.com"], "Administrator")),
-                        ("history", ("View action history for a user", "xhistory @user", vec!["xhistory @user"], "Manage Messages")),
-                    ]);
-                    if let Some((desc, usage, examples, perms)) = help_map.get(cmd_name.as_str()) {
-                        let mut embed = CreateEmbed::default();
-                        embed.title(format!("Help: x{}", cmd_name)).description(*desc)
-                            .color(EMBED_COLOR).timestamp(now_ts())
-                            .field("Usage", format!("`{}`", usage), false)
-                            .field("Required Permission", *perms, true)
-                            .field("Examples", examples.iter().map(|e| format!("`{}`", e))
-                                .collect::<Vec<_>>().join("\n"), false)
-                            .footer(|f| f.text("Coded by ransxmware.xyz Help System"));
-                        let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-                    } else {
-                        send_embed(&self.http, channel, "Command Not Found",
-                            &format!("No help available for `{}`. Use `xhelp` to see all commands.", cmd_name),
-                            0xFF0000u32).await;
-                    }
-                }
+                let mut embed = CreateEmbed::default();
+                embed.title("🛡️ Null, X : Security Menu").description("**REVSHIT**")
+                    .color(EMBED_COLOR).timestamp(now_ts())
+                    .field("🔒 Anti-Nuke",
+                        "`xantinuke on/off` `xsecurity on/off` `xsetup` `xconfig` `xstats`", true)
+                    .field("📋 Whitelist",
+                        "`xwhitelistrole` `xunwhitelistrole` `xwhitelistuser` `xunwhitelistuser` `xwhitelistlist` `xbypasslink` `xremovebypasslink` `xaddlink` `xremovelink`", true)
+                    .field("⚔️ Moderation",
+                        "`xpurge` `xwarn` `xmute` `xunmute` `xkick` `xban` `xunban` `xrole` `xhistory`", true)
+                    .field("🔧 Utility",
+                        "`xping` `xiplookup` `xipgrab` `xstatus` `xav` `xserverinfo` `xviolations` `xclearviolations`", true)
+                    .footer(|f| f.text("Coded by ransxmware.xyz — Prefix: x or null"))
+                    .thumbnail(ctx.cache.current_user().avatar_url().unwrap_or_default());
+                let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
             _ => {}
         }
@@ -3384,7 +2614,7 @@ impl Handler {
 }
 
 // ------------------------------------------------------------
-//  SLASH COMMANDS (poise) – CORRECTED
+//  SLASH COMMANDS (poise)
 // ------------------------------------------------------------
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -3409,8 +2639,7 @@ async fn whitelist_user_slash(
 ) -> Result<(), Error> {
     let gid = ctx.guild_id().unwrap();
     let data = ctx.data();
-    let mut set = data.state.whitelist_users.entry(gid).or_insert_with(HashSet::new);
-    set.insert(user.id);
+    data.state.whitelist_users.entry(gid).or_insert_with(HashSet::new).insert(user.id);
     data.db.add_whitelist_user(gid, user.id).await;
     ctx.say(format!("✅ Whitelisted {}", user.mention())).await?;
     Ok(())
@@ -3423,9 +2652,7 @@ async fn unwhitelist_user_slash(
 ) -> Result<(), Error> {
     let gid = ctx.guild_id().unwrap();
     let data = ctx.data();
-    if let Some(mut set) = data.state.whitelist_users.get_mut(&gid) {
-        set.remove(&user.id);
-    }
+    if let Some(mut set) = data.state.whitelist_users.get_mut(&gid) { set.remove(&user.id); }
     data.db.remove_whitelist_user(gid, user.id).await;
     ctx.say(format!("✅ Removed {} from whitelist", user.mention())).await?;
     Ok(())
@@ -3443,14 +2670,18 @@ async fn second_owner_slash(
         ctx.say("Only the server owner can set the second owner.").await?;
         return Ok(());
     }
-    let mut cfg = data.state.guild_configs.get_mut(&gid).unwrap();
-    cfg.second_owner_id = user.map(|u| u.id);
-    data.db.save_guild_config(gid, &cfg).await;
-    if let Some(u) = user {
-        ctx.say(format!("👑 Set {} as second owner (full immunity).", u.mention())).await?;
+    let uid = user.as_ref().map(|u| u.id);
+    let reply_text = if let Some(ref u) = user {
+        format!("👑 Set {} as second owner.", u.mention())
     } else {
-        ctx.say("✅ Removed second owner.").await?;
+        "✅ Removed second owner.".to_string()
+    };
+    {
+        let mut cfg = data.state.guild_configs.entry(gid).or_insert_with(GuildSecurityConfig::default);
+        cfg.second_owner_id = uid;
+        data.db.save_guild_config(gid, &cfg).await;
     }
+    ctx.say(reply_text).await?;
     Ok(())
 }
 
@@ -3475,7 +2706,12 @@ async fn main() -> Result<(), Error> {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![antinuke_slash(), whitelist_user_slash(), unwhitelist_user_slash(), second_owner_slash()],
+            commands: vec![
+                antinuke_slash(),
+                whitelist_user_slash(),
+                unwhitelist_user_slash(),
+                second_owner_slash(),
+            ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some("x".into()),
                 additional_prefixes: vec![poise::Prefix::Literal("null")],
