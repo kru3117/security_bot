@@ -1,9 +1,10 @@
+// ============================================================
+//  REXZ-STYLE ANTI-NUKE BOT – FULLY FEATURED
+//  Complete merged version: all original commands + new protections
+// ============================================================
 #![allow(unused_variables)]
 #![allow(dead_code)]
-// ============================================================
-//  DISCORD SECURITY BOT – FULLY FUNCTIONAL RUST VERSION
-//  Compatible with Serenity 0.11.7 / Rust 1.88.0
-// ============================================================
+
 use serenity::{
     async_trait,
     builder::CreateEmbed,
@@ -11,15 +12,15 @@ use serenity::{
     client::{Client, Context, EventHandler},
     http::Http,
     model::{
-        channel::{Channel, ChannelType, GuildChannel, Message, PermissionOverwrite,
-                  PermissionOverwriteType},
+        channel::{Channel, ChannelType, GuildChannel, PermissionOverwrite, PermissionOverwriteType},
         gateway::GatewayIntents,
-        guild::{Guild, Member, Role},
+        guild::{Guild, Member, Role, UnavailableGuild},
         id::{ChannelId, GuildId, MessageId, RoleId, UserId},
         permissions::Permissions,
         prelude::*,
         user::User,
         Timestamp,
+        emoji::Emoji,
     },
 };
 use tokio::sync::Semaphore;
@@ -34,6 +35,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use poise::serenity_prelude as serenity_poise;
+use rand::Rng;
 
 // ------------------------------------------------------------
 //  ENUM CONVERSION HELPERS
@@ -54,7 +57,6 @@ fn explicit_filter_to_u16(e: serenity::model::guild::ExplicitContentFilter) -> u
 }
 fn premium_tier_num(t: serenity::model::guild::PremiumTier) -> u8 {
     use serenity::model::guild::PremiumTier::*;
-    // FIX #3: removed None arm — not a valid variant in serenity 0.11.7
     match t { Tier1 => 1, Tier2 => 2, Tier3 => 3, _ => 0 }
 }
 
@@ -72,58 +74,6 @@ fn now_ts() -> Timestamp {
         .expect("system clock produced out-of-range timestamp")
 }
 
-use std::sync::OnceLock;
-use std::sync::Mutex;
-
-static ANTINUKE_CONFIG: OnceLock<Mutex<AntiNukeConfig>> = OnceLock::new();
-static SECURITY_CONFIG: OnceLock<Mutex<SecurityConfig>> = OnceLock::new();
-
-fn antinuke_config() -> &'static Mutex<AntiNukeConfig> {
-    ANTINUKE_CONFIG.get_or_init(|| {
-        Mutex::new(AntiNukeConfig {
-            threshold_count: 1,
-            threshold_window_secs: 0.1,
-            punishment: Punishment::Ban,
-        })
-    })
-}
-fn security_config() -> &'static Mutex<SecurityConfig> {
-    SECURITY_CONFIG.get_or_init(|| {
-        Mutex::new(SecurityConfig {
-            max_messages_per_minute: 10,
-            max_duplicate_messages: 3,
-            link_whitelist: vec![
-                "youtube.com".to_string(), "youtu.be".to_string(),
-                "github.com".to_string(), "open.spotify.com".to_string(),
-                "spotify.com".to_string(), "tenor.com".to_string(),
-                "giphy.com".to_string(), "media.tenor.com".to_string(),
-                "media.giphy.com".to_string(),
-            ],
-            banned_words: vec![
-                "spam".to_string(), "hack".to_string(), "cheat".to_string(),
-                "discord.gg".to_string(), "https://discord.gg/".to_string(),
-            ],
-            max_emojis: 5,
-            auto_ban_threshold: 5,
-        })
-    })
-}
-
-const MASS_ACTION_THRESHOLD: usize = 1;
-const MASS_ACTION_WINDOW_SECS: f64 = 0.1;
-const ACTOR_CACHE_TTL_SECS: f64 = 8.0;
-const DRAIN_DELAY_SECS: f64 = 0.15;
-const EDIT_LOG_DEDUP_TTL_SECS: f64 = 5.0;
-const CHANNEL_CREATE_DEDUP_TTL_SECS: f64 = 10.0;
-const GUILD_UPDATE_DEDUP_TTL_SECS: f64 = 5.0;
-const WEBHOOK_EVENT_DEDUP_TTL_SECS: f64 = 10.0;
-const ROLE_EVENT_DEDUP_TTL_SECS: f64 = 10.0;
-const SERVER_AD_EXPIRY_SECS: i64 = 3600;
-const AD_SPAM_TIMEOUT_MIN: i64 = 10;
-const RATE_LIMIT_MAX_COMMANDS: usize = 3;
-const RATE_LIMIT_WINDOW_SECS: f64 = 5.0;
-const RATE_LIMIT_COOLDOWN_SECS: i64 = 15;
-
 const DANGEROUS_PERMISSIONS: [Permissions; 7] = [
     Permissions::ADMINISTRATOR, Permissions::MANAGE_GUILD,
     Permissions::MANAGE_ROLES, Permissions::MANAGE_CHANNELS,
@@ -139,6 +89,19 @@ const ANTINUKE_ASCII: &str = r#"
  | |\  | |_| | | | | |_) | (_) | |_
  |_| \_|\__,_|_|_| |____/ \___/ \__|
 "#;
+
+const ACTOR_CACHE_TTL_SECS: f64 = 8.0;
+const DRAIN_DELAY_SECS: f64 = 0.15;
+const EDIT_LOG_DEDUP_TTL_SECS: f64 = 5.0;
+const CHANNEL_CREATE_DEDUP_TTL_SECS: f64 = 10.0;
+const GUILD_UPDATE_DEDUP_TTL_SECS: f64 = 5.0;
+const WEBHOOK_EVENT_DEDUP_TTL_SECS: f64 = 10.0;
+const ROLE_EVENT_DEDUP_TTL_SECS: f64 = 10.0;
+const SERVER_AD_EXPIRY_SECS: i64 = 3600;
+const AD_SPAM_TIMEOUT_MIN: i64 = 10;
+const RATE_LIMIT_MAX_COMMANDS: usize = 3;
+const RATE_LIMIT_WINDOW_SECS: f64 = 5.0;
+const RATE_LIMIT_COOLDOWN_SECS: i64 = 15;
 
 // ------------------------------------------------------------
 //  TYPES & SNAPSHOTS
@@ -166,20 +129,53 @@ impl FromStr for Punishment {
     }
 }
 
-#[derive(Debug, Clone)]
-struct AntiNukeConfig {
-    threshold_count: usize,
-    threshold_window_secs: f64,
-    punishment: Punishment,
+#[derive(Clone)]
+struct GuildSecurityConfig {
+    pub mass_ban_threshold: usize,
+    pub mass_ban_window_secs: f64,
+    pub mass_kick_threshold: usize,
+    pub mass_kick_window_secs: f64,
+    pub mass_channel_create_threshold: usize,
+    pub mass_channel_create_window_secs: f64,
+    pub mass_role_create_threshold: usize,
+    pub mass_role_create_window_secs: f64,
+    pub punishment: Punishment,
+    pub max_messages_per_minute: usize,
+    pub max_duplicate_messages: usize,
+    pub max_emojis: usize,
+    pub auto_ban_threshold: usize,
+    pub link_whitelist: Vec<String>,
+    pub banned_words: Vec<String>,
+    pub second_owner_id: Option<UserId>,
 }
-#[derive(Debug, Clone)]
-struct SecurityConfig {
-    max_messages_per_minute: usize,
-    max_duplicate_messages: usize,
-    link_whitelist: Vec<String>,
-    banned_words: Vec<String>,
-    max_emojis: usize,
-    auto_ban_threshold: usize,
+impl Default for GuildSecurityConfig {
+    fn default() -> Self {
+        Self {
+            mass_ban_threshold: 5,
+            mass_ban_window_secs: 10.0,
+            mass_kick_threshold: 5,
+            mass_kick_window_secs: 10.0,
+            mass_channel_create_threshold: 5,
+            mass_channel_create_window_secs: 10.0,
+            mass_role_create_threshold: 5,
+            mass_role_create_window_secs: 10.0,
+            punishment: Punishment::Ban,
+            max_messages_per_minute: 15,
+            max_duplicate_messages: 3,
+            max_emojis: 5,
+            auto_ban_threshold: 5,
+            link_whitelist: vec![
+                "youtube.com".to_string(), "youtu.be".to_string(),
+                "github.com".to_string(), "open.spotify.com".to_string(),
+                "tenor.com".to_string(), "giphy.com".to_string(),
+            ],
+            banned_words: vec![
+                "spam".to_string(), "hack".to_string(), "cheat".to_string(),
+                "discord.gg".to_string(),
+            ],
+            second_owner_id: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -233,7 +229,6 @@ struct ServerAdEntry {
 // ------------------------------------------------------------
 //  GLOBAL STATE
 // ------------------------------------------------------------
-#[derive(Clone)]
 struct BotState {
     protection_enabled: DashMap<GuildId, bool>,
     whitelist_roles: DashMap<GuildId, HashSet<RoleId>>,
@@ -265,30 +260,50 @@ struct BotState {
     guild_snapshots: DashMap<GuildId, GuildSnapshot>,
     channel_snapshots: DashMap<ChannelId, ChannelSnapshot>,
     role_snapshots: DashMap<RoleId, RoleSnapshot>,
+    emoji_snapshots: DashMap<GuildId, DashMap<String, Emoji>>,
     server_ad_registry: DashMap<GuildId, DashMap<UserId, ServerAdEntry>>,
     ad_spam_channels: DashMap<GuildId, DashMap<UserId, Vec<ChannelId>>>,
     api_semaphore: Arc<Semaphore>,
+    guild_configs: DashMap<GuildId, GuildSecurityConfig>,
 }
 impl BotState {
     fn new() -> Self {
         Self {
-            protection_enabled: DashMap::new(), whitelist_roles: DashMap::new(),
-            whitelist_users: DashMap::new(), link_bypass_users: DashMap::new(),
-            link_bypass_roles: DashMap::new(), muted_users: DashMap::new(),
-            user_violations: DashMap::new(), user_message_times: DashMap::new(),
-            user_messages: DashMap::new(), user_warnings: DashMap::new(),
-            action_log: DashMap::new(), mass_action_log: DashMap::new(),
-            confirmed_actors: DashMap::new(), ban_in_progress: DashMap::new(),
-            rollback_queue: DashMap::new(), drain_scheduled: DashMap::new(),
-            restoring: DashMap::new(), edit_logged: DashMap::new(),
-            handled_channel_creates: DashMap::new(), handled_guild_updates: DashMap::new(),
-            handled_webhook_events: DashMap::new(), handled_role_events: DashMap::new(),
-            role_restore_locks: DashMap::new(), dangerous_members: DashMap::new(),
-            command_timestamps: DashMap::new(), rate_limited_until: DashMap::new(),
-            audit_prefetch: DashMap::new(), guild_snapshots: DashMap::new(),
-            channel_snapshots: DashMap::new(), role_snapshots: DashMap::new(),
-            server_ad_registry: DashMap::new(), ad_spam_channels: DashMap::new(),
+            protection_enabled: DashMap::new(),
+            whitelist_roles: DashMap::new(),
+            whitelist_users: DashMap::new(),
+            link_bypass_users: DashMap::new(),
+            link_bypass_roles: DashMap::new(),
+            muted_users: DashMap::new(),
+            user_violations: DashMap::new(),
+            user_message_times: DashMap::new(),
+            user_messages: DashMap::new(),
+            user_warnings: DashMap::new(),
+            action_log: DashMap::new(),
+            mass_action_log: DashMap::new(),
+            confirmed_actors: DashMap::new(),
+            ban_in_progress: DashMap::new(),
+            rollback_queue: DashMap::new(),
+            drain_scheduled: DashMap::new(),
+            restoring: DashMap::new(),
+            edit_logged: DashMap::new(),
+            handled_channel_creates: DashMap::new(),
+            handled_guild_updates: DashMap::new(),
+            handled_webhook_events: DashMap::new(),
+            handled_role_events: DashMap::new(),
+            role_restore_locks: DashMap::new(),
+            dangerous_members: DashMap::new(),
+            command_timestamps: DashMap::new(),
+            rate_limited_until: DashMap::new(),
+            audit_prefetch: DashMap::new(),
+            guild_snapshots: DashMap::new(),
+            channel_snapshots: DashMap::new(),
+            role_snapshots: DashMap::new(),
+            emoji_snapshots: DashMap::new(),
+            server_ad_registry: DashMap::new(),
+            ad_spam_channels: DashMap::new(),
             api_semaphore: Arc::new(Semaphore::new(20)),
+            guild_configs: DashMap::new(),
         }
     }
 }
@@ -296,197 +311,229 @@ impl BotState {
 // ------------------------------------------------------------
 //  DATABASE
 // ------------------------------------------------------------
-#[derive(Clone)]
-struct Database { pool: PgPool }
+struct Database {
+    pool: PgPool,
+}
 impl Database {
     async fn new(url: &str) -> Self {
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(url)
             .await
-            .unwrap_or_else(|e| panic!("Failed to connect to Postgres: {}", e));
-        for stmt in [
+            .expect("Failed to connect to Postgres");
+        let queries = vec![
             "CREATE TABLE IF NOT EXISTS protection ( guild_id BIGINT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0 )",
             "CREATE TABLE IF NOT EXISTS whitelist_users ( guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, PRIMARY KEY (guild_id, user_id) )",
             "CREATE TABLE IF NOT EXISTS whitelist_roles ( guild_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMARY KEY (guild_id, role_id) )",
             "CREATE TABLE IF NOT EXISTS muted_users ( guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, until_ts TEXT NOT NULL, PRIMARY KEY (guild_id, user_id) )",
-            r#"CREATE TABLE IF NOT EXISTS guild_config ( guild_id BIGINT PRIMARY KEY, threshold_count BIGINT NOT NULL DEFAULT 1, threshold_window BIGINT NOT NULL DEFAULT 10, punishment TEXT NOT NULL DEFAULT 'ban', max_messages_per_minute BIGINT NOT NULL DEFAULT 10, max_duplicate_messages BIGINT NOT NULL DEFAULT 3, max_emojis BIGINT NOT NULL DEFAULT 5, auto_ban_threshold BIGINT NOT NULL DEFAULT 5, link_whitelist TEXT NOT NULL DEFAULT '["youtube.com","github.com"]', banned_words TEXT NOT NULL DEFAULT '["spam","hack","cheat","discord.gg"]' )"#,
+            r#"CREATE TABLE IF NOT EXISTS guild_config (
+                guild_id BIGINT PRIMARY KEY,
+                mass_ban_threshold BIGINT NOT NULL DEFAULT 5,
+                mass_ban_window_secs FLOAT NOT NULL DEFAULT 10.0,
+                mass_kick_threshold BIGINT NOT NULL DEFAULT 5,
+                mass_kick_window_secs FLOAT NOT NULL DEFAULT 10.0,
+                mass_channel_create_threshold BIGINT NOT NULL DEFAULT 5,
+                mass_channel_create_window_secs FLOAT NOT NULL DEFAULT 10.0,
+                mass_role_create_threshold BIGINT NOT NULL DEFAULT 5,
+                mass_role_create_window_secs FLOAT NOT NULL DEFAULT 10.0,
+                punishment TEXT NOT NULL DEFAULT 'ban',
+                max_messages_per_minute BIGINT NOT NULL DEFAULT 15,
+                max_duplicate_messages BIGINT NOT NULL DEFAULT 3,
+                max_emojis BIGINT NOT NULL DEFAULT 5,
+                auto_ban_threshold BIGINT NOT NULL DEFAULT 5,
+                link_whitelist TEXT NOT NULL DEFAULT '["youtube.com","github.com"]',
+                banned_words TEXT NOT NULL DEFAULT '["spam","hack","cheat","discord.gg"]',
+                second_owner_id BIGINT
+            )"#,
             "CREATE TABLE IF NOT EXISTS link_bypass_users ( guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, PRIMARY KEY (guild_id, user_id) )",
             "CREATE TABLE IF NOT EXISTS link_bypass_roles ( guild_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMARY KEY (guild_id, role_id) )",
             "CREATE TABLE IF NOT EXISTS action_history ( id SERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', timestamp TEXT NOT NULL )",
-        ] {
+        ];
+        for stmt in queries {
             if let Err(e) = sqlx::query(stmt).execute(&pool).await {
-                println!("[DB INIT ERROR] {}: {}", stmt.split_whitespace().take(5).collect::<Vec<_>>().join(" "), e);
+                println!("[DB INIT ERROR] {}", e);
             }
         }
         Self { pool }
     }
 
     async fn load_all(&self, state: &BotState) {
-        let rows = sqlx::query("SELECT guild_id, enabled FROM protection")
+        let rows = sqlx::query!("SELECT guild_id, enabled FROM protection")
             .fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
-            let gid = GuildId(row.get::<i64, _>(0) as u64);
-            state.protection_enabled.insert(gid, row.get::<i32, _>(1) != 0);
+            let gid = GuildId(row.guild_id as u64);
+            state.protection_enabled.insert(gid, row.enabled != 0);
         }
-        let rows = sqlx::query("SELECT guild_id, user_id FROM whitelist_users")
+        let rows = sqlx::query!("SELECT guild_id, user_id FROM whitelist_users")
             .fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
-            let gid = GuildId(row.get::<i64, _>(0) as u64);
-            let uid = UserId(row.get::<i64, _>(1) as u64);
+            let gid = GuildId(row.guild_id as u64);
+            let uid = UserId(row.user_id as u64);
             state.whitelist_users.entry(gid).or_insert_with(HashSet::new).insert(uid);
         }
-        let rows = sqlx::query("SELECT guild_id, role_id FROM whitelist_roles")
+        let rows = sqlx::query!("SELECT guild_id, role_id FROM whitelist_roles")
             .fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
-            let gid = GuildId(row.get::<i64, _>(0) as u64);
-            let rid = RoleId(row.get::<i64, _>(1) as u64);
+            let gid = GuildId(row.guild_id as u64);
+            let rid = RoleId(row.role_id as u64);
             state.whitelist_roles.entry(gid).or_insert_with(HashSet::new).insert(rid);
         }
-        let rows = sqlx::query("SELECT guild_id, user_id FROM link_bypass_users")
+        let rows = sqlx::query!("SELECT guild_id, user_id FROM link_bypass_users")
             .fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
-            let gid = GuildId(row.get::<i64, _>(0) as u64);
-            let uid = UserId(row.get::<i64, _>(1) as u64);
+            let gid = GuildId(row.guild_id as u64);
+            let uid = UserId(row.user_id as u64);
             state.link_bypass_users.entry(gid).or_insert_with(HashSet::new).insert(uid);
         }
-        let rows = sqlx::query("SELECT guild_id, role_id FROM link_bypass_roles")
+        let rows = sqlx::query!("SELECT guild_id, role_id FROM link_bypass_roles")
             .fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
-            let gid = GuildId(row.get::<i64, _>(0) as u64);
-            let rid = RoleId(row.get::<i64, _>(1) as u64);
+            let gid = GuildId(row.guild_id as u64);
+            let rid = RoleId(row.role_id as u64);
             state.link_bypass_roles.entry(gid).or_insert_with(HashSet::new).insert(rid);
         }
         let now = now_pht();
-        let rows = sqlx::query("SELECT guild_id, user_id, until_ts FROM muted_users")
+        let rows = sqlx::query!("SELECT guild_id, user_id, until_ts FROM muted_users")
             .fetch_all(&self.pool).await.unwrap_or_default();
         for row in rows {
-            let uid = UserId(row.get::<i64, _>(1) as u64);
-            if let Ok(until) = DateTime::parse_from_rfc3339(row.get::<&str, _>(2)) {
+            let uid = UserId(row.user_id as u64);
+            if let Ok(until) = DateTime::parse_from_rfc3339(&row.until_ts) {
                 if until > now {
                     state.muted_users.insert(uid, until);
                 } else {
-                    let _ = sqlx::query("DELETE FROM muted_users WHERE user_id = $1 AND guild_id = $2")
-                        .bind(uid.0 as i64).bind(row.get::<i64, _>(0))
+                    let _ = sqlx::query!("DELETE FROM muted_users WHERE user_id = $1 AND guild_id = $2", row.user_id, row.guild_id)
                         .execute(&self.pool).await;
                 }
             }
         }
+        let rows = sqlx::query!("SELECT * FROM guild_config")
+            .fetch_all(&self.pool).await.unwrap_or_default();
+        for row in rows {
+            let config = GuildSecurityConfig {
+                mass_ban_threshold: row.mass_ban_threshold as usize,
+                mass_ban_window_secs: row.mass_ban_window_secs as f64,
+                mass_kick_threshold: row.mass_kick_threshold as usize,
+                mass_kick_window_secs: row.mass_kick_window_secs as f64,
+                mass_channel_create_threshold: row.mass_channel_create_threshold as usize,
+                mass_channel_create_window_secs: row.mass_channel_create_window_secs as f64,
+                mass_role_create_threshold: row.mass_role_create_threshold as usize,
+                mass_role_create_window_secs: row.mass_role_create_window_secs as f64,
+                punishment: Punishment::from_str(&row.punishment).unwrap_or(Punishment::Ban),
+                max_messages_per_minute: row.max_messages_per_minute as usize,
+                max_duplicate_messages: row.max_duplicate_messages as usize,
+                max_emojis: row.max_emojis as usize,
+                auto_ban_threshold: row.auto_ban_threshold as usize,
+                link_whitelist: serde_json::from_str(&row.link_whitelist).unwrap_or_default(),
+                banned_words: serde_json::from_str(&row.banned_words).unwrap_or_default(),
+                second_owner_id: row.second_owner_id.map(|id| UserId(id as u64)),
+            };
+            state.guild_configs.insert(GuildId(row.guild_id as u64), config);
+        }
         println!("[DB] All data loaded.");
     }
 
+    async fn save_guild_config(&self, gid: GuildId, cfg: &GuildSecurityConfig) {
+        let _ = sqlx::query!(
+            r#"INSERT INTO guild_config (
+                guild_id, mass_ban_threshold, mass_ban_window_secs,
+                mass_kick_threshold, mass_kick_window_secs,
+                mass_channel_create_threshold, mass_channel_create_window_secs,
+                mass_role_create_threshold, mass_role_create_window_secs,
+                punishment, max_messages_per_minute, max_duplicate_messages,
+                max_emojis, auto_ban_threshold, link_whitelist, banned_words, second_owner_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT (guild_id) DO UPDATE SET
+                mass_ban_threshold = EXCLUDED.mass_ban_threshold,
+                mass_ban_window_secs = EXCLUDED.mass_ban_window_secs,
+                mass_kick_threshold = EXCLUDED.mass_kick_threshold,
+                mass_kick_window_secs = EXCLUDED.mass_kick_window_secs,
+                mass_channel_create_threshold = EXCLUDED.mass_channel_create_threshold,
+                mass_channel_create_window_secs = EXCLUDED.mass_channel_create_window_secs,
+                mass_role_create_threshold = EXCLUDED.mass_role_create_threshold,
+                mass_role_create_window_secs = EXCLUDED.mass_role_create_window_secs,
+                punishment = EXCLUDED.punishment,
+                max_messages_per_minute = EXCLUDED.max_messages_per_minute,
+                max_duplicate_messages = EXCLUDED.max_duplicate_messages,
+                max_emojis = EXCLUDED.max_emojis,
+                auto_ban_threshold = EXCLUDED.auto_ban_threshold,
+                link_whitelist = EXCLUDED.link_whitelist,
+                banned_words = EXCLUDED.banned_words,
+                second_owner_id = EXCLUDED.second_owner_id"#,
+            gid.0 as i64,
+            cfg.mass_ban_threshold as i64,
+            cfg.mass_ban_window_secs,
+            cfg.mass_kick_threshold as i64,
+            cfg.mass_kick_window_secs,
+            cfg.mass_channel_create_threshold as i64,
+            cfg.mass_channel_create_window_secs,
+            cfg.mass_role_create_threshold as i64,
+            cfg.mass_role_create_window_secs,
+            cfg.punishment.as_str(),
+            cfg.max_messages_per_minute as i64,
+            cfg.max_duplicate_messages as i64,
+            cfg.max_emojis as i64,
+            cfg.auto_ban_threshold as i64,
+            serde_json::to_string(&cfg.link_whitelist).unwrap(),
+            serde_json::to_string(&cfg.banned_words).unwrap(),
+            cfg.second_owner_id.map(|id| id.0 as i64)
+        ).execute(&self.pool).await;
+    }
+
     async fn set_protection(&self, gid: GuildId, en: bool) {
-        sqlx::query("INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled")
-            .bind(gid.0 as i64).bind(en as i32).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("INSERT INTO protection(guild_id, enabled) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET enabled = EXCLUDED.enabled", gid.0 as i64, en as i32)
+            .execute(&self.pool).await;
     }
     async fn add_whitelist_user(&self, gid: GuildId, uid: UserId) {
-        sqlx::query("INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("INSERT INTO whitelist_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, uid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn remove_whitelist_user(&self, gid: GuildId, uid: UserId) {
-        sqlx::query("DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2")
-            .bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("DELETE FROM whitelist_users WHERE guild_id = $1 AND user_id = $2", gid.0 as i64, uid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn add_whitelist_role(&self, gid: GuildId, rid: RoleId) {
-        sqlx::query("INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("INSERT INTO whitelist_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, rid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn remove_whitelist_role(&self, gid: GuildId, rid: RoleId) {
-        sqlx::query("DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2")
-            .bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("DELETE FROM whitelist_roles WHERE guild_id = $1 AND role_id = $2", gid.0 as i64, rid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn add_link_bypass_user(&self, gid: GuildId, uid: UserId) {
-        sqlx::query("INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("INSERT INTO link_bypass_users(guild_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, uid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn remove_link_bypass_user(&self, gid: GuildId, uid: UserId) {
-        sqlx::query("DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2")
-            .bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("DELETE FROM link_bypass_users WHERE guild_id = $1 AND user_id = $2", gid.0 as i64, uid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn add_link_bypass_role(&self, gid: GuildId, rid: RoleId) {
-        sqlx::query("INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("INSERT INTO link_bypass_roles(guild_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", gid.0 as i64, rid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn remove_link_bypass_role(&self, gid: GuildId, rid: RoleId) {
-        sqlx::query("DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2")
-            .bind(gid.0 as i64).bind(rid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("DELETE FROM link_bypass_roles WHERE guild_id = $1 AND role_id = $2", gid.0 as i64, rid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn add_mute(&self, gid: GuildId, uid: UserId, until: DateTime<chrono::FixedOffset>) {
-        sqlx::query("INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts")
-            .bind(gid.0 as i64).bind(uid.0 as i64).bind(until.to_rfc3339())
-            .execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("INSERT INTO muted_users(guild_id, user_id, until_ts) VALUES ($1, $2, $3) ON CONFLICT (guild_id, user_id) DO UPDATE SET until_ts = EXCLUDED.until_ts",
+            gid.0 as i64, uid.0 as i64, until.to_rfc3339())
+            .execute(&self.pool).await;
     }
     async fn remove_mute(&self, gid: GuildId, uid: UserId) {
-        sqlx::query("DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2")
-            .bind(gid.0 as i64).bind(uid.0 as i64).execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
+        let _ = sqlx::query!("DELETE FROM muted_users WHERE guild_id = $1 AND user_id = $2", gid.0 as i64, uid.0 as i64)
+            .execute(&self.pool).await;
     }
     async fn log_action(&self, gid: GuildId, uid: UserId, action: &str, reason: &str) {
         let ts = now_pht().to_rfc3339();
-        sqlx::query("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1, $2, $3, $4, $5)")
-            .bind(gid.0 as i64).bind(uid.0 as i64).bind(action).bind(reason).bind(ts)
-            .execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
-    }
-    async fn save_guild_config(&self, gid: GuildId) {
-        let (threshold_count, threshold_window_ms, punishment_str,
-             max_messages_per_minute, max_duplicate_messages, max_emojis,
-             auto_ban_threshold, link_whitelist_json, banned_words_json) = {
-            let sec_guard = security_config().lock().unwrap();
-            let anti_guard = antinuke_config().lock().unwrap();
-            (
-                anti_guard.threshold_count as i64,
-                (anti_guard.threshold_window_secs * 1000.0) as i64,
-                anti_guard.punishment.as_str().to_string(),
-                sec_guard.max_messages_per_minute as i64,
-                sec_guard.max_duplicate_messages as i64,
-                sec_guard.max_emojis as i64,
-                sec_guard.auto_ban_threshold as i64,
-                serde_json::to_string(&sec_guard.link_whitelist).unwrap_or_default(),
-                serde_json::to_string(&sec_guard.banned_words).unwrap_or_default(),
-            )
-        };
-        sqlx::query("INSERT INTO guild_config(guild_id, threshold_count, threshold_window, punishment, max_messages_per_minute, max_duplicate_messages, max_emojis, auto_ban_threshold, link_whitelist, banned_words) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (guild_id) DO UPDATE SET threshold_count=EXCLUDED.threshold_count, threshold_window=EXCLUDED.threshold_window, punishment=EXCLUDED.punishment, max_messages_per_minute=EXCLUDED.max_messages_per_minute, max_duplicate_messages=EXCLUDED.max_duplicate_messages, max_emojis=EXCLUDED.max_emojis, auto_ban_threshold=EXCLUDED.auto_ban_threshold, link_whitelist=EXCLUDED.link_whitelist, banned_words=EXCLUDED.banned_words")
-            .bind(gid.0 as i64).bind(threshold_count).bind(threshold_window_ms)
-            .bind(punishment_str).bind(max_messages_per_minute).bind(max_duplicate_messages)
-            .bind(max_emojis).bind(auto_ban_threshold)
-            .bind(link_whitelist_json).bind(banned_words_json)
-            .execute(&self.pool).await
-            .unwrap_or_else(|e| { println!("[DB ERROR] {}", e); Default::default() });
-    }
-    async fn load_guild_config(&self, gid: GuildId) {
-        if let Some(row) = sqlx::query("SELECT * FROM guild_config WHERE guild_id = $1")
-            .bind(gid.0 as i64).fetch_optional(&self.pool).await.unwrap_or(None)
-        {
-            let mut sec_guard = security_config().lock().unwrap();
-            let mut anti_guard = antinuke_config().lock().unwrap();
-            let cfg = &mut *sec_guard;
-            let antinuke = &mut *anti_guard;
-            antinuke.threshold_count = row.get::<i64, _>(1) as usize;
-            antinuke.threshold_window_secs = row.get::<i64, _>(2) as f64 / 1000.0;
-            antinuke.punishment = Punishment::from_str(row.get::<&str, _>(3)).unwrap_or(Punishment::Ban);
-            cfg.max_messages_per_minute = row.get::<i64, _>(4) as usize;
-            cfg.max_duplicate_messages = row.get::<i64, _>(5) as usize;
-            cfg.max_emojis = row.get::<i64, _>(6) as usize;
-            cfg.auto_ban_threshold = row.get::<i64, _>(7) as usize;
-            cfg.link_whitelist = serde_json::from_str(row.get::<&str, _>(8)).unwrap_or_default();
-            cfg.banned_words = serde_json::from_str(row.get::<&str, _>(9)).unwrap_or_default();
-        }
+        let _ = sqlx::query!("INSERT INTO action_history(guild_id, user_id, action, reason, timestamp) VALUES ($1, $2, $3, $4, $5)",
+            gid.0 as i64, uid.0 as i64, action, reason, ts)
+            .execute(&self.pool).await;
     }
 }
 
 // ------------------------------------------------------------
-//  HELPERS
+//  HELPERS (Whitelist, Snapshots, Mass action detection, etc.)
 // ------------------------------------------------------------
 async fn is_whitelisted(state: &BotState, http: &Http, cache: &Cache, gid: GuildId, uid: UserId) -> bool {
     if let Ok(current) = http.get_current_user().await {
@@ -494,6 +541,9 @@ async fn is_whitelisted(state: &BotState, http: &Http, cache: &Cache, gid: Guild
     }
     if let Some(guild) = gid.to_guild_cached(cache) {
         if uid == guild.owner_id { return true; }
+    }
+    if let Some(cfg) = state.guild_configs.get(&gid) {
+        if cfg.second_owner_id == Some(uid) { return true; }
     }
     if let Some(set) = state.whitelist_users.get(&gid) {
         if set.contains(&uid) { return true; }
@@ -570,6 +620,15 @@ fn snap_role(role: &Role) -> RoleSnapshot {
     }
 }
 
+async fn take_emoji_snapshot(state: &BotState, http: &Http, gid: GuildId, cache: &Cache) {
+    if let Some(guild) = gid.to_guild_cached(cache) {
+        let map = state.emoji_snapshots.entry(gid).or_insert_with(DashMap::new);
+        for emoji in guild.emojis.values() {
+            map.insert(emoji.name.clone(), emoji.clone());
+        }
+    }
+}
+
 async fn build_permission_map(state: &BotState, http: &Http, cache: &Cache, gid: GuildId) {
     let guild = match gid.to_guild_cached(cache) { Some(g) => g, None => return };
     let mut dangerous = HashSet::new();
@@ -635,6 +694,7 @@ async fn get_actor_fast(
         "channel_update" => 11, "role_create" => 30,
         "role_delete" => 32, "role_update" => 31,
         "guild_update" => 1, "webhook_create" => 50,
+        "emoji_delete" => 62, "member_unban" => 23,
         _ => return None,
     };
     if let Ok(logs) = gid.audit_logs(http, Some(action_type), None, None, Some(3)).await {
@@ -662,6 +722,9 @@ async fn log_violation(
     let mut count = state.user_violations.entry(user.id).or_insert(0);
     *count += 1;
     let total = *count;
+    let cfg = state.guild_configs.get(&gid).cloned().unwrap_or_default();
+    let auto_ban_threshold = cfg.auto_ban_threshold;
+
     let user_mention = user.mention();
     let user_id_str = format!("{}", user.id);
     let total_str = total.to_string();
@@ -680,9 +743,7 @@ async fn log_violation(
     {
         let _ = log_id.send_message(http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
     }
-    if total >= security_config().lock().unwrap().auto_ban_threshold
-        && !is_whitelisted(state, http, cache, gid, user.id).await
-    {
+    if total >= auto_ban_threshold && !is_whitelisted(state, http, cache, gid, user.id).await {
         let _ = gid.ban_with_reason(http, user.id, 0,
             &format!("Auto-ban: {} security violations", total)).await;
     }
@@ -695,7 +756,7 @@ async fn instant_ban_and_rollback(
     log_extra: String,
 ) {
     if !state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) { return; }
-    if is_whitelisted(&*state, &*http, &*cache, gid, actor).await { return; }
+    if is_whitelisted(&state, &http, &cache, gid, actor).await { return; }
     let ban_set = state.ban_in_progress.entry(gid).or_insert_with(DashSet::new);
     if ban_set.contains(&actor) { return; }
     ban_set.insert(actor);
@@ -731,16 +792,24 @@ async fn check_mass_action(
 ) {
     if !state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) { return; }
     if is_whitelisted(state, http, cache, gid, actor).await { return; }
+    let cfg = state.guild_configs.get(&gid).cloned().unwrap_or_default();
+    let (threshold, window_secs) = match action_type {
+        "Ban" => (cfg.mass_ban_threshold, cfg.mass_ban_window_secs),
+        "Kick" => (cfg.mass_kick_threshold, cfg.mass_kick_window_secs),
+        "ChannelCreate" => (cfg.mass_channel_create_threshold, cfg.mass_channel_create_window_secs),
+        "RoleCreate" => (cfg.mass_role_create_threshold, cfg.mass_role_create_window_secs),
+        _ => return,
+    };
     let now = now_pht().timestamp_millis() as f64 / 1000.0;
     let mass_log = state.mass_action_log.entry(gid).or_insert_with(DashMap::new);
     let mut timestamps = mass_log.entry(actor).or_insert_with(Vec::new);
     timestamps.push(now);
-    timestamps.retain(|t| now - *t <= MASS_ACTION_WINDOW_SECS);
+    timestamps.retain(|t| now - *t <= window_secs);
     let count = timestamps.len();
-    if count >= MASS_ACTION_THRESHOLD {
+    if count >= threshold {
         timestamps.clear();
         if let Ok(member) = gid.member(http, actor).await {
-            let reason = format!("Mass {}: {} {}s in {}s", action_type, count, action_type, MASS_ACTION_WINDOW_SECS);
+            let reason = format!("Mass {}: {} {}s in {}s", action_type, count, action_type, window_secs);
             let manageable: Vec<RoleId> = member.roles.iter()
                 .filter(|r| r.0 != gid.0).copied().collect();
             if !manageable.is_empty() {
@@ -754,7 +823,7 @@ async fn check_mass_action(
                 let actor_tag = member.user.tag();
                 let actor_id_str = format!("{}", actor.0);
                 let count_str = count.to_string();
-                let window_str = format!("{}s", MASS_ACTION_WINDOW_SECS);
+                let window_str = format!("{}s", window_secs);
                 let action_upper = action_type.to_uppercase();
                 let mut embed = CreateEmbed::default();
                 embed.title(format!("🚨 ANTI MASS {}", action_upper)).color(0xFF0000u32).timestamp(now_ts())
@@ -768,29 +837,6 @@ async fn check_mass_action(
     }
 }
 
-async fn auto_kick_security_threat(
-    state: &BotState, http: &Http, cache: &Cache, db: &Database,
-    gid: GuildId, member: &Member, reason: &str,
-) {
-    if is_whitelisted(state, http, cache, gid, member.user.id).await { return; }
-    let _ = member.kick_with_reason(http, reason).await;
-    let _ = db.log_action(gid, member.user.id, "AUTO-KICK", reason).await;
-    let member_mention = member.user.mention();
-    let member_id_str = member.user.id.0.to_string();
-    let mut embed = CreateEmbed::default();
-    embed.title("AUTO-KICK")
-        .description(format!("Member {} has been automatically kicked for a security threat.", member_mention))
-        .color(0xFF4500u32).timestamp(now_ts())
-        .field("Reason", reason, false)
-        .field("User ID", member_id_str, true);
-    if let Some(log_id) = gid.channels(http).await.ok()
-        .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
-    {
-        let _ = log_id.send_message(http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
-    }
-}
-
-// FIX #6: use unsigned_abs() on position to avoid negative-cast panic
 async fn restore_channel(http: &Http, guild: &Guild, snap: &ChannelSnapshot) -> Option<ChannelId> {
     let parent_id = snap.category_id;
     let perms = snap.overwrites.clone();
@@ -836,7 +882,6 @@ async fn restore_role(
 
 async fn snapshot_all(state: &BotState, http: &Http, guild: &Guild) {
     state.guild_snapshots.insert(guild.id, snap_guild(guild));
-    // FIX #5: guild.channels is HashMap<ChannelId, GuildChannel> in serenity 0.11.7
     for (id, ch) in guild.channels.iter() {
         if let Some(guild_ch) = ch.clone().guild() {
             state.channel_snapshots.insert(*id, snap_channel(&guild_ch));
@@ -845,6 +890,7 @@ async fn snapshot_all(state: &BotState, http: &Http, guild: &Guild) {
     for (id, role) in guild.roles.iter() {
         state.role_snapshots.insert(*id, snap_role(role));
     }
+    take_emoji_snapshot(state, http, guild.id, &guild.cache()).await;
 }
 
 async fn poll_audit_logs(state: Arc<BotState>, http: Arc<Http>, cache: Arc<Cache>, gid: GuildId) {
@@ -852,6 +898,7 @@ async fn poll_audit_logs(state: Arc<BotState>, http: Arc<Http>, cache: Arc<Cache
         "channel_delete", "channel_create", "channel_update",
         "role_create", "role_delete", "role_update",
         "guild_update", "webhook_create", "ban", "kick", "member_role_update",
+        "emoji_delete", "member_unban",
     ];
     loop {
         for act in actions {
@@ -871,16 +918,26 @@ async fn cleanup_mutes(state: Arc<BotState>, db: Arc<Database>) {
         let had_removes = !to_remove.is_empty();
         for uid in &to_remove { state.muted_users.remove(uid); }
         if had_removes {
-            let _ = sqlx::query("DELETE FROM muted_users WHERE until_ts <= $1")
-                .bind(now.to_rfc3339()).execute(&db.pool).await;
+            let _ = sqlx::query!("DELETE FROM muted_users WHERE until_ts <= $1", now.to_rfc3339())
+                .execute(&db.pool).await;
         }
     }
+}
+
+async fn send_embed(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
+    let mut embed = CreateEmbed::default();
+    embed.title(title).description(desc).color(color).timestamp(now_ts());
+    let _ = ch.send_message(http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
 }
 
 // ------------------------------------------------------------
 //  EVENT HANDLER
 // ------------------------------------------------------------
-struct Handler { state: Arc<BotState>, db: Arc<Database>, http: Arc<Http> }
+struct Handler {
+    state: Arc<BotState>,
+    db: Arc<Database>,
+    http: Arc<Http>,
+}
 
 #[async_trait]
 impl EventHandler for Handler {
@@ -917,11 +974,7 @@ impl EventHandler for Handler {
         ).await;
     }
 
-    async fn guild_delete(
-        &self, ctx: Context,
-        _incomplete: serenity::model::guild::UnavailableGuild,
-        _full: Option<Guild>,
-    ) {
+    async fn guild_delete(&self, ctx: Context, _incomplete: UnavailableGuild, _full: Option<Guild>) {
         let server_count = ctx.cache.guilds().len();
         ctx.set_presence(
             Some(serenity::model::gateway::Activity::watching(format!("over {} servers!", server_count))),
@@ -1076,7 +1129,6 @@ impl EventHandler for Handler {
         }
     }
 
-    // FIX: channel_update signature uses Option<GuildChannel> and GuildChannel directly
     async fn channel_update(&self, ctx: Context, old: Option<Channel>, new: Channel) {
         let old = match old.and_then(|c| c.guild()) { Some(o) => o, None => return };
         let new = match new.guild() { Some(n) => n, None => return };
@@ -1135,11 +1187,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_update(
-        &self, ctx: Context,
-        old: Option<Guild>,
-        new: serenity::model::guild::PartialGuild,
-    ) {
+    async fn guild_update(&self, ctx: Context, old: Option<Guild>, new: serenity::model::guild::PartialGuild) {
         let old = match old {
             Some(g) => g,
             None => { self.state.guild_snapshots.insert(new.id, snap_partial_guild(&new)); return; }
@@ -1174,7 +1222,6 @@ impl EventHandler for Handler {
                         let sverif = s.verification_level;
                         let snotif = s.default_notifications;
                         let secf = s.explicit_content_filter;
-                        // FIX #12: gid is Copy — no mut needed
                         let _ = gid.edit(&http, |e| {
                             use serenity::model::guild::{
                                 DefaultMessageNotificationLevel, ExplicitContentFilter,
@@ -1317,9 +1364,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_role_delete(
-        &self, ctx: Context, gid: GuildId, role_id: RoleId, role: Option<Role>,
-    ) {
+    async fn guild_role_delete(&self, ctx: Context, gid: GuildId, role_id: RoleId, role: Option<Role>) {
         let role = match role {
             Some(r) => r,
             None => { self.state.role_snapshots.remove(&role_id); return; }
@@ -1352,6 +1397,58 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn guild_emojis_update(
+        &self, ctx: Context, guild_id: GuildId,
+        _current_state: Option<Vec<Emoji>>, _added: Vec<Emoji>, removed: Vec<Emoji>,
+    ) {
+        if !self.state.protection_enabled.get(&guild_id).map(|e| *e).unwrap_or(false) { return; }
+        if removed.is_empty() { return; }
+        if let Some(actor) = get_actor_fast(&self.state, &self.http, &ctx.cache, guild_id, "emoji_delete").await {
+            if is_whitelisted(&self.state, &self.http, &ctx.cache, guild_id, actor).await {
+                take_emoji_snapshot(&self.state, &self.http, guild_id, &ctx.cache).await;
+                return;
+            }
+            let _ = guild_id.ban_with_reason(&self.http, actor, 0, "[Anti-Nuke] Unauthorized emoji deletion").await;
+            if let Some(log_id) = guild_id.channels(&self.http).await.ok()
+                .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
+            {
+                let mut embed = CreateEmbed::default();
+                embed.title("🚨 ANTI-NUKE — EMOJI DELETION").color(0xFF0000u32).timestamp(now_ts())
+                    .field("Actor", format!("`{}`", actor.0), true)
+                    .field("Action", format!("Deleted {} emojis", removed.len()), true)
+                    .field("Punishment", "Actor banned", true);
+                let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+            }
+        } else {
+            take_emoji_snapshot(&self.state, &self.http, guild_id, &ctx.cache).await;
+        }
+    }
+
+    async fn guild_ban_removal(&self, ctx: Context, guild_id: GuildId, user: User) {
+        if !self.state.protection_enabled.get(&guild_id).map(|e| *e).unwrap_or(false) { return; }
+        if let Ok(logs) = guild_id.audit_logs(&self.http, Some(23), None, None, Some(5)).await {
+            for entry in logs.entries {
+                if entry.target_id == Some(user.id.0) {
+                    let actor = entry.user_id;
+                    if is_whitelisted(&self.state, &self.http, &ctx.cache, guild_id, actor).await { return; }
+                    let _ = guild_id.ban_with_reason(&self.http, user.id, 0, "[Anti-Nuke] Unauthorized unban - reverted").await;
+                    let _ = guild_id.ban_with_reason(&self.http, actor, 0, "[Anti-Nuke] Unauthorized unban attempt").await;
+                    if let Some(log_id) = guild_id.channels(&self.http).await.ok()
+                        .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs").map(|(id, _)| id))
+                    {
+                        let mut embed = CreateEmbed::default();
+                        embed.title("🚨 ANTI-NUKE — UNAUTHORIZED UNBAN").color(0xFF0000u32).timestamp(now_ts())
+                            .field("Unban Attempt By", format!("`{}`", actor.0), true)
+                            .field("Target User", user.mention(), true)
+                            .field("Action", "Actor banned, Target re-banned", false);
+                        let _ = log_id.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     async fn guild_ban_addition(&self, ctx: Context, gid: GuildId, banned_user: User) {
         tokio::time::sleep(Duration::from_millis(50)).await;
         if let Ok(logs) = gid.audit_logs(&self.http, Some(22u8), None, None, Some(5)).await {
@@ -1366,9 +1463,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_member_removal(
-        &self, ctx: Context, gid: GuildId, user: User, _member_data: Option<Member>,
-    ) {
+    async fn guild_member_removal(&self, ctx: Context, gid: GuildId, user: User, _member_data: Option<Member>) {
         tokio::time::sleep(Duration::from_millis(50)).await;
         if let Ok(logs) = gid.audit_logs(&self.http, Some(20u8), None, None, Some(5)).await {
             for entry in logs.entries {
@@ -1393,10 +1488,9 @@ impl EventHandler for Handler {
                     if age < 20.0 && entry.target_id == Some(new_member.user.id.0) {
                         let adder = entry.user_id;
                         if !is_whitelisted(&self.state, &self.http, &ctx.cache, gid, adder).await {
-                            auto_kick_security_threat(
-                                &self.state, &self.http, &ctx.cache, &self.db, gid, &new_member,
-                                "Unauthorized bot addition detected — Security Protocol Activated",
-                            ).await;
+                            let _ = new_member.kick(&self.http).await;
+                            let _ = self.db.log_action(gid, new_member.user.id, "AUTO-KICK-BOT",
+                                &format!("Added by user {}", adder.0)).await;
                         }
                         break;
                     }
@@ -1405,9 +1499,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn guild_member_update(
-        &self, ctx: Context, old_if_available: Option<Member>, new: Member,
-    ) {
+    async fn guild_member_update(&self, ctx: Context, old_if_available: Option<Member>, new: Member) {
         let gid = new.guild_id;
         let old_roles = old_if_available.map(|o| o.roles).unwrap_or_default();
         for role_id in new.roles.iter().filter(|r| !old_roles.contains(r)) {
@@ -1423,11 +1515,10 @@ impl EventHandler for Handler {
                                 let assigner = entry.user_id;
                                 if !is_whitelisted(&self.state, &self.http, &ctx.cache, gid, assigner).await {
                                     if let Ok(assigner_member) = gid.member(&self.http, assigner).await {
-                                        auto_kick_security_threat(
-                                            &self.state, &self.http, &ctx.cache, &self.db, gid,
-                                            &assigner_member,
-                                            &format!("Granted dangerous permissions to {}", new.user.tag()),
-                                        ).await;
+                                        let _ = assigner_member.kick_with_reason(&self.http,
+                                            &format!("Granted dangerous permissions to {}", new.user.tag())).await;
+                                        let _ = self.db.log_action(gid, assigner, "AUTO-KICK-DANGEROUS-PERMS",
+                                            &format!("Assigned role {} to {}", role.name, new.user.tag())).await;
                                     }
                                 }
                                 break;
@@ -1441,6 +1532,7 @@ impl EventHandler for Handler {
         build_permission_map(&self.state, &self.http, &ctx.cache, gid).await;
     }
 
+    // Message handler – now using per-guild config
     async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.bot { return; }
         let gid = match msg.guild_id { Some(g) => g, None => return };
@@ -1505,6 +1597,7 @@ impl EventHandler for Handler {
         if self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false) {
             let member = match msg.member(&ctx).await { Ok(m) => m, Err(_) => return };
             let link_bypassed = is_link_bypassed(&self.state, &self.http, &ctx.cache, gid, &member).await;
+            let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
 
             let invite_re = Regex::new(
                 r"(?i)discord\.gg/([a-zA-Z0-9]+)|discord(?:app)?\.com/invite/([a-zA-Z0-9]+)"
@@ -1609,8 +1702,7 @@ impl EventHandler for Handler {
 
             let recent_times_len = self.state.user_message_times.get(&msg.author.id)
                 .map(|t| t.len()).unwrap_or(0);
-            let max_msgs = security_config().lock().unwrap().max_messages_per_minute;
-            if recent_times_len > max_msgs {
+            if recent_times_len > cfg.max_messages_per_minute {
                 let _ = msg.delete(&self.http).await;
                 log_violation(&self.state, &self.http, &ctx.cache, gid, &msg.author,
                     "SPAM DETECTION",
@@ -1625,8 +1717,7 @@ impl EventHandler for Handler {
                     r.iter().filter(|m| *m == &msg.content.to_lowercase()).count()
                 }).unwrap_or(0)
             };
-            let max_dup = security_config().lock().unwrap().max_duplicate_messages;
-            if dup_count > max_dup {
+            if dup_count > cfg.max_duplicate_messages {
                 let _ = msg.delete(&self.http).await;
                 log_violation(&self.state, &self.http, &ctx.cache, gid, &msg.author,
                     "DUPLICATE SPAM", "Sending identical messages repeatedly",
@@ -1635,10 +1726,8 @@ impl EventHandler for Handler {
             }
 
             if !link_bypassed {
-                let lower = msg.content.to_lowercase();
-                let banned_words = security_config().lock().unwrap().banned_words.clone();
-                for word in &banned_words {
-                    if lower.contains(word.as_str()) {
+                for word in &cfg.banned_words {
+                    if msg.content.to_lowercase().contains(word.as_str()) {
                         let _ = msg.delete(&self.http).await;
                         log_violation(&self.state, &self.http, &ctx.cache, gid, &msg.author,
                             "BANNED WORD",
@@ -1651,22 +1740,20 @@ impl EventHandler for Handler {
 
             let emoji_re = Regex::new(r"<:[^:]+:\d+>|[\u{1F600}-\u{1F64F}]").unwrap();
             let emoji_count = emoji_re.find_iter(&msg.content).count();
-            let max_emojis = security_config().lock().unwrap().max_emojis;
-            if emoji_count > max_emojis {
+            if emoji_count > cfg.max_emojis {
                 let _ = msg.delete(&self.http).await;
                 log_violation(&self.state, &self.http, &ctx.cache, gid, &msg.author,
                     "EMOJI SPAM",
-                    &format!("Used {} emojis (limit: {})", emoji_count, max_emojis),
+                    &format!("Used {} emojis (limit: {})", emoji_count, cfg.max_emojis),
                     msg.channel_id).await;
                 return;
             }
 
             if !link_bypassed {
                 let url_re = Regex::new(r"https?://[^\s]+").unwrap();
-                let link_whitelist = security_config().lock().unwrap().link_whitelist.clone();
                 for url in url_re.find_iter(&msg.content) {
                     let url_str = url.as_str();
-                    let allowed = link_whitelist.iter().any(|d| url_str.contains(d.as_str()));
+                    let allowed = cfg.link_whitelist.iter().any(|d| url_str.contains(d.as_str()));
                     let is_gif = url_str.to_lowercase().ends_with(".gif");
                     if !allowed && !is_gif {
                         let _ = msg.delete(&self.http).await;
@@ -1683,7 +1770,7 @@ impl EventHandler for Handler {
 }
 
 // ------------------------------------------------------------
-//  COMMAND PROCESSING
+//  COMMAND PROCESSING – ALL ORIGINAL COMMANDS ADAPTED
 // ------------------------------------------------------------
 impl Handler {
     async fn process_commands(&self, ctx: Context, msg: &Message) {
@@ -1696,20 +1783,13 @@ impl Handler {
         let cmd = args.first().unwrap_or(&"").to_lowercase();
         let rest = &args[1..];
 
-        println!("[CMD] user={} cmd={:?} rest={:?}", msg.author.name, cmd, rest);
-
-        let gid = match msg.guild_id { Some(g) => g, None => { println!("[CMD] no guild"); return; } };
+        let gid = match msg.guild_id { Some(g) => g, None => return };
         let author = &msg.author;
         let channel = msg.channel_id;
 
         let guild = match gid.to_guild_cached(&ctx.cache) {
             Some(g) => g,
             None => {
-                println!("[CMD] guild not in cache yet for {}", gid.0);
-                match self.http.get_guild(gid.0).await {
-                    Ok(_) => {},
-                    Err(e) => { println!("[CMD] guild HTTP fetch failed: {}", e); }
-                }
                 let _ = channel.send_message(&self.http, |m| {
                     m.content("⚠️ Guild not cached yet — please wait a moment and try again.")
                 }).await;
@@ -1723,11 +1803,9 @@ impl Handler {
         let member = match guild.members.get(&author.id).cloned() {
             Some(m) => m,
             None => {
-                println!("[CMD] member not in cache, fetching via HTTP");
                 match gid.member(&self.http, author.id).await {
                     Ok(m) => m,
                     Err(e) => {
-                        println!("[CMD] member fetch failed: {}", e);
                         let _ = channel.send_message(&self.http, |m| {
                             m.content("⚠️ Could not fetch member data. Please check bot permissions (View Members).")
                         }).await;
@@ -1738,7 +1816,6 @@ impl Handler {
         };
         drop(guild);
 
-        // FIX #11: manual permission computation
         let effective_perms = if let Some(g) = gid.to_guild_cached(&ctx.cache) {
             let mut perms = Permissions::empty();
             if let Some(everyone) = g.roles.get(&RoleId(gid.0)) {
@@ -1764,8 +1841,7 @@ impl Handler {
         let manage_roles = is_owner() || effective_perms.contains(Permissions::MANAGE_ROLES)
                            || effective_perms.contains(Permissions::ADMINISTRATOR);
 
-        println!("[CMD] owner={} admin={} perms={:?}", is_owner(), is_admin, effective_perms.bits());
-
+        // Helper to send an embed quickly
         async fn send_embed(http: &Http, ch: ChannelId, title: &str, desc: &str, color: u32) {
             let mut embed = CreateEmbed::default();
             embed.title(title).description(desc).color(color).timestamp(now_ts());
@@ -1798,11 +1874,12 @@ impl Handler {
                         .description(format!("Anti-Nuke + Security Protection: **{}**", status))
                         .color(color).timestamp(now_ts());
                     if enabled {
+                        let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
                         embed.field("Active Protections", format!(
                             "• Anti Webhook Create\n• Anti Channel Create / Delete / Update\n• Anti Guild Update\n• Anti Role Create / Update / Delete\n• Message moderation (spam, caps, links, etc.)\nThreshold: **{} actions** in **{}s** → **{}**",
-                            antinuke_config().lock().unwrap().threshold_count,
-                            antinuke_config().lock().unwrap().threshold_window_secs,
-                            antinuke_config().lock().unwrap().punishment.as_str().to_uppercase()
+                            cfg.mass_ban_threshold,
+                            cfg.mass_ban_window_secs,
+                            cfg.punishment.as_str().to_uppercase()
                         ), false);
                     } else {
                         embed.field("Note", "Use `xantinuke on` or `xsecurity on` to enable protection.", false);
@@ -1813,18 +1890,17 @@ impl Handler {
                 let setting = rest[0].to_lowercase();
                 if ["on","enable","true","1"].contains(&setting.as_str()) {
                     self.state.protection_enabled.insert(gid, true);
-                    println!("[DEBUG] antinuke enabled, sending embed");
                     self.db.set_protection(gid, true).await;
-                    println!("[DEBUG] db done");
+                    let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
                     let mut embed = CreateEmbed::default();
                     embed.title("Protection Enabled")
                         .description("Anti-Nuke + Security protection is now **ACTIVE**")
                         .color(0x00FF00u32).timestamp(now_ts())
                         .field("Now Protected Against",
                             format!("• Webhook creation abuse\n• Mass channel create / delete / update\n• Server (guild) settings tampering\n• Role create / update / delete spam\n• Message spam, caps, invite links, banned words\nThreshold: **{} actions / {}s** → **{}**",
-                                antinuke_config().lock().unwrap().threshold_count,
-                                antinuke_config().lock().unwrap().threshold_window_secs,
-                                antinuke_config().lock().unwrap().punishment.as_str().to_uppercase()
+                                cfg.mass_ban_threshold,
+                                cfg.mass_ban_window_secs,
+                                cfg.punishment.as_str().to_uppercase()
                             ), false)
                         .field("⚠️ Important", "Whitelist trusted admins with `xwhitelistuser @user` to avoid false triggers.", false)
                         .footer(|f| f.text("Coded by ransxmware.xyz — Protection"));
@@ -2239,6 +2315,7 @@ impl Handler {
                     return;
                 }
                 let enabled = self.state.protection_enabled.get(&gid).map(|e| *e).unwrap_or(false);
+                let cfg = self.state.guild_configs.get(&gid).cloned().unwrap_or_default();
                 let log_channel = gid.channels(&self.http).await.ok()
                     .and_then(|ch| ch.into_iter().find(|(_, c)| c.name == "security-logs")
                         .map(|(_, c)| c.mention().to_string()))
@@ -2252,24 +2329,24 @@ impl Handler {
                     .field("Logs Channel", log_channel, true)
                     .field("Anti-Nuke Settings", format!(
                         "**Threshold:**  {} actions\n**Window:**     {}s\n**Punishment:** {}",
-                        antinuke_config().lock().unwrap().threshold_count,
-                        antinuke_config().lock().unwrap().threshold_window_secs,
-                        antinuke_config().lock().unwrap().punishment.as_str().to_uppercase()
+                        cfg.mass_ban_threshold,
+                        cfg.mass_ban_window_secs,
+                        cfg.punishment.as_str().to_uppercase()
                     ), false)
                     .field("Security Limits", format!(
                         "**Messages/Minute:**    {}\n**Duplicate Messages:** {}\n**Max Emojis:**         {}\n**Auto-ban Threshold:** {} violations",
-                        security_config().lock().unwrap().max_messages_per_minute,
-                        security_config().lock().unwrap().max_duplicate_messages,
-                        security_config().lock().unwrap().max_emojis,
-                        security_config().lock().unwrap().auto_ban_threshold
+                        cfg.max_messages_per_minute,
+                        cfg.max_duplicate_messages,
+                        cfg.max_emojis,
+                        cfg.auto_ban_threshold
                     ), false)
                     .field("Whitelisted Roles",
                         format!("{} roles", self.state.whitelist_roles.get(&gid).map(|s| s.len()).unwrap_or(0)), true)
                     .field("Whitelisted Users",
                         format!("{} users", self.state.whitelist_users.get(&gid).map(|s| s.len()).unwrap_or(0)), true)
-                    .field("Allowed Domains", security_config().lock().unwrap().link_whitelist.join(", "), false)
+                    .field("Allowed Domains", cfg.link_whitelist.join(", "), false)
                     .field("Banned Words",
-                        format!("{} words filtered", security_config().lock().unwrap().banned_words.len()), true)
+                        format!("{} words filtered", cfg.banned_words.len()), true)
                     .footer(|f| f.text("Coded by ransxmware.xyz"));
                 let _ = channel.send_message(&self.http, |m| m.embed(|e| { *e = embed.clone(); e })).await;
             }
@@ -2682,7 +2759,6 @@ impl Handler {
                     let lat: f64 = rng.gen::<f64>() * (21.0 - 4.5) + 4.5;
                     let lon: f64 = rng.gen::<f64>() * (127.0 - 116.0) + 116.0;
                     (fake_ip, city.to_string(), province.to_string(), region.to_string(), isp.to_string(), lat, lon)
-
                 };
 
                 let mut embed = CreateEmbed::default();
@@ -3115,7 +3191,6 @@ impl Handler {
                     else if days >= 30 { format!("{} month(s) ago", days / 30) }
                     else { format!("{} day(s) ago", days) };
                 let created_str = format!("{} ({})", created.format("%B %d, %Y at %I:%M %p"), relative);
-                // FIX #5: pull channels from HTTP — cache GuildRef doesn't expose .channels in 0.11.7
                 let channels = gid.channels(&self.http).await.unwrap_or_default();
                 let text  = channels.values().filter(|c| c.kind == ChannelType::Text).count();
                 let voice = channels.values().filter(|c| c.kind == ChannelType::Voice).count();
@@ -3124,7 +3199,6 @@ impl Handler {
                 let bots = guild.members.values().filter(|m| m.user.bot).count();
                 let boost_level = guild.premium_tier;
                 let boost_count = guild.premium_subscription_count;
-                // FIX #3: use premium_tier_num() — PremiumTier::None removed
                 let boost_str = format!("{} Boost{} (Level {})",
                     boost_count,
                     if boost_count != 1 { "s" } else { "" },
@@ -3163,14 +3237,15 @@ impl Handler {
                 let mut domain = rest[0].to_lowercase();
                 domain = domain.trim_start_matches("https://").trim_start_matches("http://")
                     .split('/').next().unwrap_or(&domain).to_string();
-                if security_config().lock().unwrap().link_whitelist.contains(&domain) {
+                let mut cfg = self.state.guild_configs.get_mut(&gid).unwrap();
+                if cfg.link_whitelist.contains(&domain) {
                     send_embed(&self.http, channel, "❌ Already Whitelisted",
                         &format!("`{}` is already in the link whitelist.", domain), 0xFF0000u32).await;
                     return;
                 }
-                security_config().lock().unwrap().link_whitelist.push(domain.clone());
-                self.db.save_guild_config(gid).await;
-                let total = security_config().lock().unwrap().link_whitelist.len();
+                cfg.link_whitelist.push(domain.clone());
+                self.db.save_guild_config(gid, &cfg).await;
+                let total = cfg.link_whitelist.len();
                 let mut embed = CreateEmbed::default();
                 embed.title("✅ Link Whitelisted")
                     .description(format!("`{}` has been added to the allowed links.", domain))
@@ -3195,16 +3270,16 @@ impl Handler {
                 let mut domain = rest[0].to_lowercase();
                 domain = domain.trim_start_matches("https://").trim_start_matches("http://")
                     .split('/').next().unwrap_or(&domain).to_string();
-                let pos = security_config().lock().unwrap().link_whitelist.iter()
-                    .position(|d| *d == domain);
+                let mut cfg = self.state.guild_configs.get_mut(&gid).unwrap();
+                let pos = cfg.link_whitelist.iter().position(|d| *d == domain);
                 if pos.is_none() {
                     send_embed(&self.http, channel, "❌ Not in Whitelist",
                         &format!("`{}` is not in the link whitelist.", domain), 0xFF0000u32).await;
                     return;
                 }
-                if let Some(p) = pos { security_config().lock().unwrap().link_whitelist.remove(p); }
-                self.db.save_guild_config(gid).await;
-                let total = security_config().lock().unwrap().link_whitelist.len();
+                if let Some(p) = pos { cfg.link_whitelist.remove(p); }
+                self.db.save_guild_config(gid, &cfg).await;
+                let total = cfg.link_whitelist.len();
                 let mut embed = CreateEmbed::default();
                 embed.title("✅ Link Removed")
                     .description(format!("`{}` has been removed from the allowed links.", domain))
@@ -3231,10 +3306,10 @@ impl Handler {
                     None => { send_embed(&self.http, channel, "❌ Missing User",
                         "Please mention a user.", 0xFF0000u32).await; return; }
                 };
-                let rows = sqlx::query(
-                    "SELECT action, reason, timestamp FROM action_history WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 15"
-                ).bind(gid.0 as i64).bind(target.id.0 as i64)
-                    .fetch_all(&self.db.pool).await.unwrap_or_default();
+                let rows = sqlx::query!(
+                    "SELECT action, reason, timestamp FROM action_history WHERE guild_id = $1 AND user_id = $2 ORDER BY id DESC LIMIT 15",
+                    gid.0 as i64, target.id.0 as i64
+                ).fetch_all(&self.db.pool).await.unwrap_or_default();
                 let mut embed = CreateEmbed::default();
                 embed.title(format!("Action History — {}", target.name))
                     .description(format!("Last {} recorded actions for {}", rows.len(), target.mention()))
@@ -3244,12 +3319,12 @@ impl Handler {
                     embed.field("No History", "No recorded actions for this user in this server.", false);
                 } else {
                     for row in rows {
-                        let dt = match DateTime::parse_from_rfc3339(row.get::<&str, _>(2)) {
+                        let dt = match DateTime::parse_from_rfc3339(&row.timestamp) {
                             Ok(d) => d, Err(_) => continue
                         };
                         embed.field(
-                            format!("`{}` — {}", row.get::<&str, _>(0), dt.format("%Y-%m-%d %H:%M UTC")),
-                            row.get::<&str, _>(1), false
+                            format!("`{}` — {}", row.action, dt.format("%Y-%m-%d %H:%M UTC")),
+                            row.reason, false
                         );
                     }
                 }
@@ -3345,23 +3420,116 @@ impl Handler {
 }
 
 // ------------------------------------------------------------
+//  SLASH COMMANDS (poise)
+// ------------------------------------------------------------
+#[poise::command(slash_command, prefix_command)]
+async fn antinuke_slash(
+    ctx: poise::Context<'_, Data>,
+    #[description = "Enable or disable protection"] action: String,
+) -> Result<(), poise::Error> {
+    let gid = ctx.guild_id().unwrap();
+    let data = ctx.data();
+    let enabled = matches!(action.to_lowercase().as_str(), "on" | "enable" | "true" | "1");
+    data.state.protection_enabled.insert(gid, enabled);
+    data.db.set_protection(gid, enabled).await;
+    ctx.say(format!("🛡️ Protection {}", if enabled { "enabled" } else { "disabled" })).await?;
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command)]
+async fn whitelist_user_slash(
+    ctx: poise::Context<'_, Data>,
+    #[description = "User to whitelist"] user: serenity_poise::User,
+) -> Result<(), poise::Error> {
+    let gid = ctx.guild_id().unwrap();
+    let data = ctx.data();
+    let mut set = data.state.whitelist_users.entry(gid).or_insert_with(HashSet::new);
+    set.insert(user.id);
+    data.db.add_whitelist_user(gid, user.id).await;
+    ctx.say(format!("✅ Whitelisted {}", user.mention())).await?;
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command)]
+async fn unwhitelist_user_slash(
+    ctx: poise::Context<'_, Data>,
+    #[description = "User to remove from whitelist"] user: serenity_poise::User,
+) -> Result<(), poise::Error> {
+    let gid = ctx.guild_id().unwrap();
+    let data = ctx.data();
+    if let Some(mut set) = data.state.whitelist_users.get_mut(&gid) {
+        set.remove(&user.id);
+    }
+    data.db.remove_whitelist_user(gid, user.id).await;
+    ctx.say(format!("✅ Removed {} from whitelist", user.mention())).await?;
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command)]
+async fn second_owner_slash(
+    ctx: poise::Context<'_, Data>,
+    #[description = "User to set as second owner (or none to clear)"] user: Option<serenity_poise::User>,
+) -> Result<(), poise::Error> {
+    let gid = ctx.guild_id().unwrap();
+    let data = ctx.data();
+    let guild = gid.to_guild_cached(&ctx.cache()).unwrap();
+    if ctx.author().id != guild.owner_id {
+        ctx.say("Only the server owner can set the second owner.").await?;
+        return Ok(());
+    }
+    let mut cfg = data.state.guild_configs.get_mut(&gid).unwrap();
+    cfg.second_owner_id = user.map(|u| u.id);
+    data.db.save_guild_config(gid, &cfg).await;
+    if let Some(u) = user {
+        ctx.say(format!("👑 Set {} as second owner (full immunity).", u.mention())).await?;
+    } else {
+        ctx.say("✅ Removed second owner.").await?;
+    }
+    Ok(())
+}
+
+struct Data {
+    state: Arc<BotState>,
+    db: Arc<Database>,
+    http: Arc<Http>,
+}
+type Error = Box<dyn std::error::Error + Send + Sync>;
+
+// ------------------------------------------------------------
 //  MAIN
 // ------------------------------------------------------------
 #[tokio::main]
-async fn main() {
-    let token = std::env::var("DISCORD_TOKEN")
-        .expect("DISCORD_TOKEN environment variable not set");
+async fn main() -> Result<(), Error> {
+    let token = std::env::var("DISCORD_TOKEN")?;
+    let db_url = std::env::var("DATABASE_URL")?;
     let state = Arc::new(BotState::new());
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = Arc::new(Database::new(&db_url).await);
     db.load_all(&state).await;
     let http = Arc::new(Http::new(&token));
-    let handler = Handler { state, db, http };
+    let data = Data { state: state.clone(), db: db.clone(), http: http.clone() };
+
+    let framework = poise::Framework::builder()
+        .options(poise::FrameworkOptions {
+            commands: vec![antinuke_slash(), whitelist_user_slash(), unwhitelist_user_slash(), second_owner_slash()],
+            prefix_options: poise::PrefixFrameworkOptions {
+                prefix: Some("x".into()),
+                additional_prefixes: vec![poise::Prefix::Literal("null")],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .setup(|ctx, _ready, framework| {
+            Box::pin(async move {
+                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                Ok(data)
+            })
+        })
+        .build();
+
     let mut client = Client::builder(&token, GatewayIntents::all())
-        .event_handler(handler)
-        .await
-        .expect("Error creating client");
-    if let Err(why) = client.start().await {
-        println!("Client error: {:?}", why);
-    }
+        .framework(framework)
+        .event_handler(Handler { state, db, http })
+        .await?;
+    client.start().await?;
+    Ok(())
 }
