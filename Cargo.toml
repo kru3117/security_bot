@@ -1,4 +1,4 @@
-# Cargo.toml
+# Cargo.toml — pin poise to serenity 0.11 via compatible version
 [package]
 name = "security_bot"
 version = "0.1.0"
@@ -9,9 +9,14 @@ name = "security_bot"
 path = "src/main.rs"
 
 [dependencies]
+# serenity 0.11.7 — locked here so poise uses the same version
 serenity = { version = "0.11.7", default-features = false, features = [
     "client", "gateway", "rustls_backend", "model", "cache", "chrono",
 ] }
+# poise 0.5.7 is the last release that targets serenity 0.11.x
+# poise 0.6.x bumped to serenity 0.12, which is the source of the
+# "two different versions" GuildId / UserId / Mentionable errors.
+poise       = "0.5.7"
 tokio       = { version = "1.52.3", features = ["full"] }
 dashmap     = "5.5.3"
 chrono      = { version = "0.4.44", features = ["serde"] }
@@ -24,7 +29,6 @@ serde_json  = "1.0"
 futures     = "0.3.32"
 tracing     = "0.1.44"
 reqwest     = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
-poise       = "0.6.2"
 
 [profile.release]
 opt-level     = 3
